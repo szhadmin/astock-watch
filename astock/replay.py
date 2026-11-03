@@ -25,7 +25,7 @@ from datetime import datetime
 from . import feed, indicators as ind, strategy
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PATH = os.path.join(BASE, "data", "ai", "hypotheses.jsonl")
+PATH = os.path.join(BASE, "data", "ai", "hypotheses_replay.jsonl")
 HORIZON = 5
 MOVE_PCT = 1.0
 COST_PCT = 0.3
@@ -66,9 +66,14 @@ def hist_temp_map(index_bars=None, limit=400):
 # --------------------------------------------------------------------------- #
 # 单只股票回放
 # --------------------------------------------------------------------------- #
-def replay_code(code, bars, temp_map=None, min_score=60, max_score_bear=40, verbose=False):
-    """回放一只股票的历史判断，返回 (记录列表, 统计)。"""
+def replay_code(code, bars, temp_map=None, min_score=60, max_score_bear=40,
+                verbose=False, idx_map=None):
+    """回放一只股票的历史判断，返回 (记录列表, 统计)。
+
+    idx_map: {日期: 指数收盘}，用于计算"扣 beta"的超额收益（个股收益 − 指数收益）。
+    """
     temp_map = temp_map or {}
+    idx_map = idx_map or {}
     out = []
     n = len(bars)
     if n < 80:
@@ -114,6 +119,13 @@ def replay_code(code, bars, temp_map=None, min_score=60, max_score_bear=40, verb
                     broke = b["date"]
                     break
         end_ret = rets[-1]
+        # 扣 beta：同期指数收益，超额 = 个股 − 指数
+        idx_ret = None
+        d0 = bars[i]["date"]
+        d1 = fwd[-1]["date"]
+        if idx_map.get(d0) and idx_map.get(d1):
+            idx_ret = round((idx_map[d1] / idx_map[d0] - 1) * 100, 2)
+        excess = round(end_ret - idx_ret, 2) if idx_ret is not None else None
         if direction == "bullish":
             hit = (not broke) and end_ret >= MOVE_PCT
         else:
@@ -136,6 +148,7 @@ def replay_code(code, bars, temp_map=None, min_score=60, max_score_bear=40, verb
             "result": {"filled_at": datetime.now().strftime("%Y-%m-%d"),
                        "days": len(fwd), "end_ret": end_ret,
                        "max_gain": max_hi, "max_drawdown": max_lo,
+                       "idx_ret": idx_ret, "excess": excess,
                        "invalidated": broke, "hit": bool(hit),
                        "verdict": "命中" if hit else ("先破失效条件" if broke else "方向未走出来")},
         }
@@ -175,8 +188,16 @@ def run(codes=None, days=250, max_codes=30, verbose=True, cfg=None):
         codes = _default_universe(max_codes, cfg)
     codes = [c for c in codes][:max_codes]
     temp_map = hist_temp_map()
+    idx_map = {}
+    try:
+        ibars = feed.get_index_kline("1.000001", max(1000, days + 260))
+        idx_map = {b["date"]: b["close"] for b in ibars}
+    except Exception as exc:                          # noqa: BLE001
+        if verbose:
+            print("  指数取数失败（超额收益将为空）：%s" % exc)
     if verbose:
-        print("历史温度代理：%d 个交易日（近似值，缺涨跌家数广度）" % len(temp_map))
+        print("历史温度代理：%d 个交易日｜指数基准：%d 个交易日"
+              % (len(temp_map), len(idx_map)))
     keys = _existing_keys()
     done_codes = {c for (src, c, _d) in keys if src == "replay"}
     if done_codes:
@@ -200,7 +221,7 @@ def run(codes=None, days=250, max_codes=30, verbose=True, cfg=None):
         if not bars:
             continue
         time.sleep(0.15)                             # 礼貌间隔
-        recs, st = replay_code(code, bars, temp_map, verbose=verbose)
+        recs, st = replay_code(code, bars, temp_map, verbose=verbose, idx_map=idx_map)
         recs = [r for r in recs if ("replay", r["code"], r["date"]) not in keys]
         all_recs.extend(recs)
         stats.append(st)
@@ -222,9 +243,14 @@ def run(codes=None, days=250, max_codes=30, verbose=True, cfg=None):
         bull = len([r for r in all_recs if r["direction"] == "bullish"])
         bear = len(all_recs) - bull
         hits = len([r for r in all_recs if r["result"]["hit"]])
-        print("\n回放完成：%d 只股票 → 新增样本 %d 条（看涨 %d / 看跌 %d），命中 %d 条（%.1f%%）"
-              % (len(stats), len(all_recs), bull, bear, hits,
-                 (hits / len(all_recs) * 100) if all_recs else 0))
+        excs = [r["result"].get("excess") for r in all_recs
+                if r["result"].get("excess") is not None]
+        msg = ("\n回放完成：%d 只股票 → 新增样本 %d 条（看涨 %d / 看跌 %d），命中 %d 条（%.1f%%）"
+               % (len(stats), len(all_recs), bull, bear, hits,
+                  (hits / len(all_recs) * 100) if all_recs else 0))
+        if excs:
+            msg += "\n  扣 beta 后：平均超额 %+.2f%%（相对上证指数）" % (sum(excs) / len(excs))
+        print(msg)
     return {"codes": len(stats), "new_samples": len(all_recs), "stats": stats}
 
 

@@ -26,6 +26,7 @@ from . import feed
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AI_DIR = os.path.join(BASE, "data", "ai")
 PATH = os.path.join(AI_DIR, "hypotheses.jsonl")
+REPLAY_PATH = os.path.join(AI_DIR, "hypotheses_replay.jsonl")
 HORIZON = 5          # 观察 5 个交易日
 MOVE_PCT = 1.0       # 涨/跌 1% 以上算"方向判断成立"
 
@@ -37,11 +38,32 @@ def _ensure():
 _CACHE = {"key": None, "data": None}
 
 
-def load_all(use_cache=True):
+def _read_jsonl(path):
+    out = []
+    if not os.path.exists(path):
+        return out
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return out
+
+
+def load_all(use_cache=True, include_replay=True):
     _ensure()
     try:
-        st = os.stat(PATH)
-        key = (st.st_mtime, st.st_size)
+        st1 = os.stat(PATH)
+        st2 = os.stat(REPLAY_PATH) if os.path.exists(REPLAY_PATH) else None
+        key = (st1.st_mtime, st1.st_size,
+               (st2.st_mtime, st2.st_size) if st2 else None, include_replay)
     except OSError:
         key = None
     if use_cache and _CACHE["data"] is not None and _CACHE["key"] == key:
@@ -61,6 +83,8 @@ def load_all(use_cache=True):
                     continue
     except Exception:
         pass
+    if include_replay:
+        out = out + _read_jsonl(REPLAY_PATH)
     _CACHE.update({"key": key, "data": out})
     return out
 

@@ -22,6 +22,8 @@ from . import rules as rules_mod
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PATH = os.path.join(BASE, "data", "ai", "hypotheses.jsonl")
+REPLAY_PATH = os.path.join(BASE, "data", "ai", "hypotheses_replay.jsonl")
+USE_EXCESS = True          # True = 用"个股 − 指数"的超额收益作为目标（扣 beta）
 
 COST = 0.3
 MIN_TRAIN = 60
@@ -39,20 +41,25 @@ FIELDS = {
 }
 
 
-def _load():
-    out = []
-    if not os.path.exists(PATH):
-        return out
-    with open(PATH, encoding="utf-8-sig") as f:
+def _read(path):
+    rows = []
+    if not os.path.exists(path):
+        return rows
+    with open(path, encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
+                rows.append(json.loads(line))
             except Exception:
                 continue
-    return out
+    return rows
+
+
+def _load():
+    """读取真实决策 + 回放样本（回放样本单独一个文件，避免主文件膨胀）。"""
+    return _read(PATH) + _read(REPLAY_PATH)
 
 
 def _closed():
@@ -66,10 +73,18 @@ def _stat(samples):
         return None
     n = len(samples)
     hits = sum(1 for x in samples if x["result"].get("hit"))
-    rets = [x["result"].get("end_ret") or 0 for x in samples]
-    avg = sum(rets) / n
-    return {"n": n, "hit": round(hits / n * 100, 1), "avg": round(avg, 2),
-            "net": round(avg - COST, 2), "stocks": len({x["code"] for x in samples})}
+    raw = [x["result"].get("end_ret") or 0 for x in samples]
+    exc = [(x["result"].get("excess")
+            if x["result"].get("excess") is not None else (x["result"].get("end_ret") or 0))
+           for x in samples]
+    avg_raw = sum(raw) / n
+    # 目标收益：默认用扣 beta 的超额；没有指数数据时退回原始收益
+    target = exc if USE_EXCESS else raw
+    avg = sum(target) / n
+    return {"n": n, "hit": round(hits / n * 100, 1),
+            "avg": round(avg, 2), "raw_avg": round(avg_raw, 2),
+            "net": round(avg - COST, 2), "net_raw": round(avg_raw - COST, 2),
+            "stocks": len({x["code"] for x in samples})}
 
 
 def _match(x, field, op, th, direction=None):
@@ -213,6 +228,7 @@ def discover(verbose=True, dry_run=False):
     if verbose:
         print("  扫描条件组合 %d 个｜发现集 %d 条 / 验证集 %d 条" %
               (scanned, len(train), len(test)))
+        print("  口径：%s" % ("扣 beta（个股 − 上证指数）" if USE_EXCESS else "原始收益"))
         print("  基准（全体样本）：发现集 命中%.1f%% 净%+.2f%%｜验证集 命中%.1f%% 净%+.2f%%"
               % (base_tr["hit"], base_tr["net"], base_te["hit"], base_te["net"]))
         bt = base_dir.get(("tr", "bullish")) or {}

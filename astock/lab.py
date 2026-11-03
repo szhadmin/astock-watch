@@ -12,25 +12,27 @@ import os
 import sys
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PATH = os.path.join(BASE, "data", "ai", "hypotheses.jsonl")
+PATHS = [os.path.join(BASE, "data", "ai", "hypotheses.jsonl"),
+         os.path.join(BASE, "data", "ai", "hypotheses_replay.jsonl")]
 COST = 0.3
 
 
 def load():
     out = []
-    if not os.path.exists(PATH):
-        return out
-    with open(PATH, encoding="utf-8-sig") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                x = json.loads(line)
-            except Exception:
-                continue
-            if x.get("result") and (x.get("ctx") or {}):
-                out.append(x)
+    for p in PATHS:
+        if not os.path.exists(p):
+            continue
+        with open(p, encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    x = json.loads(line)
+                except Exception:
+                    continue
+                if x.get("result") and (x.get("ctx") or {}):
+                    out.append(x)
     return out
 
 
@@ -44,10 +46,15 @@ def bucket_stats(rows, key, buckets):
             out.append({"档": "%s~%s" % (lo, hi), "n": 0})
             continue
         rets = [r["result"].get("end_ret") or 0 for r in sel]
+        excs = [(r["result"].get("excess")
+                 if r["result"].get("excess") is not None else (r["result"].get("end_ret") or 0))
+                for r in sel]
         hits = sum(1 for r in sel if r["result"].get("hit"))
         out.append({"档": "%s~%s" % (lo, hi), "n": len(sel),
                     "平均收益%": round(sum(rets) / len(rets), 2),
                     "扣费后%": round(sum(rets) / len(rets) - COST, 2),
+                    "超额%": round(sum(excs) / len(excs), 2),
+                    "扣费超额%": round(sum(excs) / len(excs) - COST, 2),
                     "命中率%": round(hits / len(sel) * 100, 1),
                     "股票数": len({r["code"] for r in sel})})
     return out
@@ -84,17 +91,17 @@ def main():
     print("① 综合评分分层（评分到底有没有区分度？）")
     st = bucket_stats(rows, "score", [(0, 40), (40, 50), (50, 60), (60, 70), (70, 101)])
     for x in st:
-        print("   %-8s n=%-5s 平均%+6s%% 扣费后%+6s%% 命中%5s%% 股票%s"
+        print("   %-8s n=%-5s 平均%+6s%% 扣费后%+6s%% 超额%+6s%% 扣费后超额%+6s%% 命中%5s%%"
               % (x["档"], x.get("n"), x.get("平均收益%", "-"), x.get("扣费后%", "-"),
-                 x.get("命中率%", "-"), x.get("股票数", "-")))
+                 x.get("超额%", "-"), x.get("扣费超额%", "-"), x.get("命中率%", "-")))
     print("   → 单调性：%s\n" % monotonic(st))
 
     print("② 大盘温度分层")
     st = bucket_stats(rows, "temp", [(0, 25), (25, 40), (40, 60), (60, 75), (75, 101)])
     for x in st:
-        print("   %-8s n=%-5s 平均%+6s%% 扣费后%+6s%% 命中%5s%%"
+        print("   %-8s n=%-5s 平均%+6s%% 扣费后%+6s%% 超额%+6s%% 扣费后超额%+6s%% 命中%5s%%"
               % (x["档"], x.get("n"), x.get("平均收益%", "-"), x.get("扣费后%", "-"),
-                 x.get("命中率%", "-")))
+                 x.get("超额%", "-"), x.get("扣费超额%", "-"), x.get("命中率%", "-")))
     print("   → 单调性：%s\n" % monotonic(st))
 
     print("③ 方向分离（看涨/看跌各自的基准）")
