@@ -22,8 +22,8 @@ from datetime import datetime
 
 from . import (altdata, evolution, feed, holdings, hypothesis,
                indicators as ind, llm as llm_mod, mailer, market, memory,
-               monitor, notify, paper, rules as rules_mod, screener as scr,
-               sizing)
+               monitor, notify, paper, priors, rules as rules_mod,
+               screener as scr, sizing)
 from .notify import color
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -569,6 +569,7 @@ class AITrader:
             "大盘温度": temp_info,
             "行业板块强度(涨幅前列)": sector_rows,
             "风控收紧(代码已生效，不可违反)": gate_info,
+            "系统已验证先验(代码维护，优先级最高，不可协商)": priors.text(),
             "板块强度过滤规则": market.sector_rules(self.ai_cfg),
             "仓位加权规则(代码已生效)": {
                 "说明": "单股上限 = min(大盘闸门, 风控上限) × 评分系数；"
@@ -890,6 +891,7 @@ class AITrader:
             "今日日记": memory.recent_journal(1, 1200),
             "我过去的判断与真实结果(务必据此改规则，别凭印象)": judgment_rows,
             "我的判断记分卡": card,
+            "系统已验证先验(勿改写)": priors.text(900),
             "我的错题本(最近判断失误，必须逐条归因)": mistakes,
             "策略手册版本A/B(不同版本生效期间的表现)": ab,
             "我的现用手册": memory.read_playbook()[:2500],

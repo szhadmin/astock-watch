@@ -84,12 +84,12 @@ def save_playbook(text, tag="update"):
     with open(PLAYBOOK, "w", encoding="utf-8") as f:
         f.write(text)
     _snapshot_playbook(text, tag)
-    return True
-    try:
+    try:                                  # 登记到 A/B 版本库（供回滚与对比）
         from . import evolution
         evolution.snapshot_playbook(text, tag=tag)
     except Exception:
         pass
+    return True
 
 def _snapshot_playbook(text, tag):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")

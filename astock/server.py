@@ -27,8 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import (ai_agent, altdata, backup, discover, evolution, feed, holdings,
-               hypothesis, lab, mailer, market, memory, monitor, paper, regime,
-               replay, report, rules, screener)
+               hypothesis, lab, mailer, market, memory, monitor, paper,
+               priors, regime, replay, report, rules, screener)
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -743,6 +743,11 @@ def api_jobs(_q):
             "account_busy": ACCOUNT_LOCK.locked()}
 
 
+def api_priors(_q):
+    """系统已验证的先验（代码维护，AI 不可修改）。"""
+    return {"items": priors.VERIFIED, "text": priors.text()}
+
+
 def api_regime(_q):
     """市场状态细分（牛/熊/窄幅缩量/宽幅剧震/常规震荡）+ 对应策略。"""
     try:
@@ -1217,6 +1222,7 @@ GET_ROUTES = {
     "/api/backups": api_backups,
     "/api/market": api_market,
     "/api/regime": api_regime,
+    "/api/priors": api_priors,
     "/api/altstatus": api_altstatus,
     "/api/altdata": api_altdata,
     "/api/holdings": api_holdings,

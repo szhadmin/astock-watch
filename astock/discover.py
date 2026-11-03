@@ -161,6 +161,42 @@ def discover(verbose=True, dry_run=False):
                         rec["超额%"] = edge_c_tr
                         rec["验证超额%"] = edge_c_te
                         (found if validated else candidates).append(rec)
+    # 分类条件：市场状态细分（牛市/熊市/窄幅缩量/宽幅剧震/常规震荡）
+    for sub in ("牛市", "熊市", "窄幅缩量", "宽幅剧震", "常规震荡"):
+        for direction, dname in (("bullish", "看涨"), ("bearish", "看跌")):
+            scanned += 1
+
+            def _sel(x, sub=sub, direction=direction):
+                ctx = x.get("ctx") or {}
+                return (ctx.get("regime") == sub
+                        and (x.get("direction") or "") == direction)
+
+            tr = [x for x in train if _sel(x)]
+            st_tr = _stat(tr)
+            if not st_tr or st_tr["n"] < min(MIN_TRAIN, 40):
+                continue
+            b_tr = base_dir.get(("tr", direction)) or {"net": 0, "hit": 0, "n": 1}
+            if b_tr["n"] and st_tr["n"] > 0.6 * b_tr["n"]:
+                continue
+            te = [x for x in test if _sel(x)]
+            st_te = _stat(te)
+            b_te = base_dir.get(("te", direction)) or {"net": 0, "hit": 0, "n": 1}
+            e_tr = round(st_tr["net"] - b_tr["net"], 2)
+            e_te = (round(st_te["net"] - b_te["net"], 2) if st_te else None)
+            if e_tr >= MIN_EDGE_TRAIN and st_tr["hit"] - b_tr["hit"] >= MIN_HIT_EDGE:
+                ok = bool(st_te and st_te["n"] >= 20 and st_te["stocks"] >= 15
+                          and (e_te or 0) >= MIN_EDGE_TEST)
+                txt = "当市场处于「%s」时按%s方向交易" % (sub, dname)
+                rec = _mk(txt, "买入" if direction == "bullish" else "卖出",
+                          "regime", "==", sub, direction, st_tr, st_te, ok)
+                rec["id"] = "g_%s_%s" % (sub, direction[:4])
+                rec["cond"] = None                 # 分类条件不进数值匹配
+                rec["可机读"] = False
+                rec["检验方法"] = "history_replay_regime"
+                rec["超额%"] = e_tr
+                rec["验证超额%"] = e_te
+                (found if ok else candidates).append(rec)
+
     # 组合条件：温度 × 评分（只测少数关键阈值，避免组合爆炸/过拟合）
     for t_th in (25, 40, 60):
         for s_th in (45, 60, 70):

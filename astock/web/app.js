@@ -1312,6 +1312,10 @@ const App = (() => {
           <span class="spacer"></span>
           <span class="dim" style="font-size:12px">不用敲命令，点按钮就行</span>
         </div>
+        <div class="card" style="margin-top:10px;background:#0d1622">
+          <b style="font-size:13px">系统已验证的六条先验（写死在代码里，AI 改不掉）</b>
+          <div id="priors-box" class="dim" style="font-size:12px;margin-top:6px">加载中…</div>
+        </div>
         <div class="dim" style="font-size:12px;margin-top:6px">
           这里做三件事：① 用历史数据回放 AI 的决策（造出几万条"如果当时这么做会怎样"的样本）；
           ② 从样本里自动找规律（含样本外验证，防止自欺）；③ 把结果按特征分层展示，告诉你哪条信号真有优势。
@@ -1343,6 +1347,17 @@ const App = (() => {
         </tbody></table>
       </div>`;
     loadLab();
+  }
+
+  async function loadPriors() {
+    const box = $('priors-box');
+    if (!box) return;
+    try {
+      const d = await api('/api/priors');
+      box.innerHTML = (d.items || []).map(p =>
+        `<div style="margin:4px 0"><b>${esc(p['主题'])}</b>：${esc(p['数据'])}<br>
+          <span style="color:#9fb3c8">→ ${esc(p['规则'])}</span></div>`).join('');
+    } catch (e) { box.innerHTML = '读取失败'; }
   }
 
   async function startResearch() {
@@ -1411,6 +1426,7 @@ const App = (() => {
         </div>
         <div id="rules-box" style="margin-top:12px"><div class="dim">加载中…</div></div>
         <div id="evo-box" style="margin-top:16px" class="dim">加载中…</div></div>`;
+    loadPriors();
     loadRules();
     loadEvolution();
   }
@@ -1659,7 +1675,7 @@ const App = (() => {
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
     go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
     loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules, loadEvolution, rollbackPlaybook,
-    loadLab, startResearch();
+    loadLab, startResearch, loadPriors();
   }
 
   async function loadArchive() {
@@ -2050,6 +2066,6 @@ const App = (() => {
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
     go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
     loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules, loadEvolution, rollbackPlaybook,
-    loadLab, startResearch
+    loadLab, startResearch, loadPriors
   };
 })();
