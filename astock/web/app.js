@@ -87,6 +87,127 @@ const App = (() => {
     </svg>`;
   }
 
+  /* ---------------- 仪表盘：我的持仓 + AI 建议卡 ---------------- */
+  function myHoldCardHtml(h, adv) {
+    if (!h || h.error) return '<div class="dim">我的持仓读取中…</div>';
+    const s = h.summary || {};
+    if (!h.items || !h.items.length) {
+      return `<div class="dim">还没有录入真实持仓。</div>
+        <div class="row" style="margin-top:8px"><button class="btn tiny" onclick="App.go('holdings')">去录入</button></div>`;
+    }
+    const advMap = {};
+    (adv && adv.items || []).forEach(a => { advMap[a.code] = a; });
+    const rows = h.items.map(r => {
+      if (!r.ok) return `<tr><td class="l">${esc(r.code)}</td><td colspan="5" class="dim">${esc(r.error || '')}</td></tr>`;
+      const a = advMap[r.code];
+      const advTxt = a ? `<span class="${a['建议'] === '加仓' ? 'up' : (['减仓','清仓','止损'].includes(a['建议']) ? 'down' : 'dim')}">${esc(a['建议'])}</span>
+        <span class="dim" style="font-size:11px"> ${esc((a['触发位'] || '').slice(0, 14))}</span>` : '<span class="dim">--</span>';
+      return `<tr title="点击看K线" style="cursor:pointer" onclick="App.openKline('${r.code}')">
+        <td class="l">${esc(r.name || '')} <span class="dim mono">${r.code}</span></td>
+        <td>${r.shares}</td><td>${n2(r.cost, 3)}</td><td>${n2(r.price)}</td>
+        <td class="${cls(r.pnl_pct)}">${pct(r.pnl_pct)}</td><td class="l">${advTxt}</td></tr>`;
+    }).join('');
+    return `
+      <div class="row">
+        <span class="tag">市值 ${money(s.total_mv)}</span>
+        <span class="tag ${cls(s.pnl)}">浮盈 ${s.pnl >= 0 ? '+' : ''}${money(s.pnl)}（${pct(s.pnl_pct)}）</span>
+        <span class="tag">仓位 ${n2(s.position_pct, 1)}%</span>
+        <span class="tag">可用 ${money(s.cash)}</span>
+        <span class="spacer"></span>
+        <button class="btn tiny" onclick="App.go('holdings')">录入/编辑</button>
+        <button class="btn tiny" onclick="App.run('decide')">让 AI 给建议</button>
+      </div>
+      <table style="margin-top:8px"><thead><tr><th>标的</th><th>股数</th><th>成本</th>
+        <th>现价</th><th>浮盈</th><th class="l">AI 建议</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="dim" style="font-size:11px;margin-top:6px">
+        ${adv && adv.ts ? 'AI 建议更新于 ' + esc(adv.ts) + (adv.market_view ? '｜' + esc(String(adv.market_view).slice(0, 50)) : '') : '还没有 AI 建议：点右侧按钮让它决策一次'}</div>`;
+  }
+
+  async function loadMyHoldDashboard() {
+    let h = null, adv = null;
+    try { h = await api('/api/holdings'); } catch (e) { h = { error: e.message }; }
+    try { adv = await api('/api/holdings_advice'); } catch (e) { adv = null; }
+    const box = $('myhold-body');
+    if (box) box.innerHTML = myHoldCardHtml(h, adv);
+  }
+
+  /* ---------------- 邮件通知设置 ---------------- */
+  async function loadMail() {
+    const box = $('mail-body');
+    if (!box) return;
+    try {
+      const m = await api('/api/mail');
+      box.innerHTML = `
+        <div class="row" style="margin-bottom:8px">
+          <label class="row" style="gap:6px;font-size:13px">
+            <input type="checkbox" id="mail-enabled" ${m.enabled ? 'checked' : ''} style="width:auto"> 启用邮件通知</label>
+          <span class="tag ${m.ready ? 'ok' : 'warn'}">${m.ready ? '已就绪' : esc(m.status || '未配置')}</span>
+        </div>
+        <div class="grid g2">
+          <div>
+            <label class="dim" style="font-size:12px">SMTP 服务器
+              <input id="mail-host" value="${esc(m.smtp_host || '')}" placeholder="smtp.qq.com" style="width:100%"></label>
+            <label class="dim" style="font-size:12px">端口
+              <input id="mail-port" type="number" value="${m.smtp_port || 465}" style="width:100%"></label>
+            <label class="dim" style="font-size:12px">加密
+              <select id="mail-ssl" style="width:100%">
+                <option value="1" ${m.use_ssl ? 'selected' : ''}>SSL（465）</option>
+                <option value="0" ${!m.use_ssl ? 'selected' : ''}>STARTTLS（587）</option>
+              </select></label>
+          </div>
+          <div>
+            <label class="dim" style="font-size:12px">发件邮箱
+              <input id="mail-user" value="${esc(m.user || '')}" placeholder="you@qq.com" style="width:100%"></label>
+            <label class="dim" style="font-size:12px">授权码 / 密码
+              <input id="mail-pass" type="password" value="${esc(m.password || '')}" placeholder="留空=不修改" style="width:100%"></label>
+            <label class="dim" style="font-size:12px">收件邮箱（多个用逗号）
+              <input id="mail-to" value="${esc(m.to || '')}" placeholder="you@qq.com" style="width:100%"></label>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="row" style="gap:5px;font-size:12px"><input type="checkbox" id="mail-ev-trade" ${(m.events||{}).trade ? 'checked' : ''} style="width:auto"> 买卖成交</label>
+          <label class="row" style="gap:5px;font-size:12px"><input type="checkbox" id="mail-ev-review" ${(m.events||{}).review ? 'checked' : ''} style="width:auto"> 收盘复盘</label>
+          <label class="row" style="gap:5px;font-size:12px"><input type="checkbox" id="mail-ev-plan" ${(m.events||{}).plan ? 'checked' : ''} style="width:auto"> 次日计划/日报</label>
+          <span class="spacer"></span>
+          <button class="btn primary" onclick="App.saveMail()">保存</button>
+          <button class="btn" onclick="App.testMail()">发测试邮件</button>
+        </div>
+        <div class="dim" style="font-size:12px;margin-top:6px">
+          QQ/163 邮箱要填「授权码」（在邮箱设置里开启 SMTP 后获得），不是登录密码。
+        </div>`;
+    } catch (e) { box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>'; }
+  }
+
+  async function saveMail() {
+    const body = {
+      enabled: ($('mail-enabled') || {}).checked || false,
+      smtp_host: ($('mail-host') || {}).value || '',
+      smtp_port: parseInt(($('mail-port') || {}).value || 465, 10),
+      use_ssl: ($('mail-ssl') || {}).value === '1',
+      user: ($('mail-user') || {}).value || '',
+      password: ($('mail-pass') || {}).value || '',
+      to: ($('mail-to') || {}).value || '',
+      events: {
+        trade: ($('mail-ev-trade') || {}).checked || false,
+        review: ($('mail-ev-review') || {}).checked || false,
+        plan: ($('mail-ev-plan') || {}).checked || false,
+      },
+    };
+    try {
+      const r = await post('/api/mail', body);
+      toast(r.ready ? '已保存，邮件通知就绪' : '已保存，但还没配好：' + (r.status || ''));
+      loadMail();
+    } catch (e) { toast('保存失败：' + e.message, true); }
+  }
+
+  async function testMail() {
+    toast('正在发送…');
+    try {
+      const r = await post('/api/mail/test', {});
+      toast(r.message || (r.ok ? '已发送' : '发送失败'), !r.ok);
+    } catch (e) { toast('发送失败：' + e.message, true); }
+  }
+
   /* ---------------- 页面：仪表盘（局部刷新，不闪） ---------------- */
   /* ---------------- 页面：仪表盘（局部刷新，不闪） ---------------- */
   function kpiCardsHtml(ov) {
@@ -196,6 +317,7 @@ const App = (() => {
     const { ov, eq } = await loadDashboardData();
     S.ov = ov;
     renderHeader(ov);
+    loadMyHoldDashboard();
     $('view').innerHTML = `
       <div class="grid g3" id="kpi-cards">${kpiCardsHtml(ov)}</div>
       <div class="grid g2" style="margin-top:14px">
@@ -226,6 +348,7 @@ const App = (() => {
     setHtml('watch-card-body', watchHtml(ov));
     setHtml('plans-card-body', plansHtml(ov));
     setHtml('rails-card-body', railsHtml(ov));
+    loadMyHoldDashboard();
     const flash = $('view');
     if (flash) { flash.classList.add('soft-updated'); setTimeout(() => flash.classList.remove('soft-updated'), 400); }
   }
@@ -892,9 +1015,14 @@ const App = (() => {
         </div>
         <div id="hold-edit" style="margin-top:12px"></div>
       </div>
+      <div class="card" style="margin-top:14px"><h3>AI 操作建议 <span class="dim" style="font-weight:400">（基于你的成本与当前盘面）</span></h3>
+        <div id="hold-advice" class="dim">加载中…</div>
+        <div class="row" style="margin-top:8px"><button class="btn tiny" onclick="App.run('decide')">让 AI 重新决策</button></div>
+      </div>
       <div id="hold-analysis" style="margin-top:14px"></div>`;
     renderHoldEditor();
     renderHoldAnalysis(d);
+    renderHoldAdvice();
   }
 
   function renderHoldEditor() {
@@ -957,6 +1085,27 @@ const App = (() => {
       renderHoldAnalysis(r);
       toast('已保存并完成分析');
     } catch (e) { toast('保存失败：' + e.message, true); }
+  }
+
+  async function renderHoldAdvice() {
+    const box = $('hold-advice');
+    if (!box) return;
+    try {
+      const a = await api('/api/holdings_advice');
+      const items = a.items || [];
+      if (!items.length) {
+        box.innerHTML = '<div class="dim">' + esc(a.hint || '还没有 AI 建议') + '</div>';
+        return;
+      }
+      box.innerHTML = `<div class="dim" style="font-size:12px;margin-bottom:6px">更新时间 ${esc(a.ts || '')}
+          ${a.market_view ? '｜' + esc(a.market_view) : ''}</div>
+        <table><thead><tr><th>标的</th><th>建议</th><th>触发位</th><th>理由</th></tr></thead><tbody>
+        ${items.map(x => `<tr><td class="l">${esc(x.name || '')} <span class="dim mono">${esc(x.code)}</span></td>
+          <td class="${['加仓','买入'].includes(x['建议']) ? 'up' : (['减仓','清仓','止损','卖出'].includes(x['建议']) ? 'down' : 'dim')}">${esc(x['建议'])}</td>
+          <td class="dim">${esc(x['触发位'] || '-')}</td>
+          <td class="l dim" style="font-size:12px">${esc(x['理由'] || '')}</td></tr>`).join('')}
+        </tbody></table>`;
+    } catch (e) { box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>'; }
   }
 
   function renderHoldAnalysis(d) {
@@ -1182,7 +1331,8 @@ const App = (() => {
         </div>
       </div>
       <div class="card hidden" id="doc-view" style="margin-top:14px"><h3 id="doc-title"></h3><pre id="doc-body"></pre></div>`;
-    loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow();
+    loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
+    go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard();
   }
 
   async function loadArchive() {
@@ -1302,6 +1452,10 @@ const App = (() => {
         </div>
       </div>
 
+      <div class="card" style="margin-top:14px"><h3>邮件通知（买卖提醒 / 复盘 / 次日计划）</h3>
+        <div id="mail-body" class="dim">加载中…</div>
+      </div>
+
       <div class="card" style="margin-top:14px"><h3>扩展数据源（可选：财报 / 股东 / 龙虎榜）</h3>
         <div id="altdata-body" class="dim">检查中…</div>
         <div class="dim" style="margin-top:8px;font-size:12px">
@@ -1337,6 +1491,7 @@ const App = (() => {
     S.style = null;
     loadBackups();
     loadAltdata();
+    loadMail();
   }
 
   async function saveConfig(railsOnly) {
@@ -1485,6 +1640,8 @@ const App = (() => {
     } catch (e) { box.innerHTML = '<div class="dim">状态获取失败</div>'; }
   }
 
+  function go(tab) { location.hash = '#' + tab; route(tab, true); }
+
   /* ---------------- 数据备份 ---------------- */
   async function loadBackups() {
     const box = $('backup-body');
@@ -1563,6 +1720,7 @@ const App = (() => {
     showDecision, showPrompt, showReport, showJournal, showPb, showFailed,
     addWatch, saveWatch, openKline, selectJob, setKlinePeriod, setKlineDays,
     toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore,
-    loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow
+    loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
+    go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard
   };
 })();

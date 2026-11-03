@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 
 from . import feed, signals
@@ -78,9 +79,22 @@ def _advise(rep, pnl_pct):
         stop, "/".join("%.2f" % x for x in lv["targets"][:2]) or "--"), "ok"
 
 
-def analyze(cfg=None, verbose=False):
+_CACHE = {"ts": 0.0, "key": None, "res": None}
+CACHE_TTL = 60.0
+
+
+def _key(d):
+    return (d.get("capital"), tuple(sorted((i["code"], i["shares"], i["cost"])
+                                           for i in d["items"])))
+
+
+def analyze(cfg=None, verbose=False, use_cache=True):
     """返回 {capital, summary, items:[...]}，每只含现价/盈亏/评分/止损/目标/建议。"""
     d = load()
+    k = _key(d)
+    if use_cache and _CACHE["res"] and _CACHE["key"] == k \
+            and time.time() - _CACHE["ts"] < CACHE_TTL:
+        return _CACHE["res"]
     rows = []
     total_cost = total_mv = 0.0
     for it in d["items"]:
@@ -133,8 +147,10 @@ def analyze(cfg=None, verbose=False):
     for r in rows:                                    # 仓位占比
         if r.get("ok") and total_mv:
             r["weight_pct"] = round(r["mv"] / total_mv * 100, 1)
-    return {"capital": capital, "summary": summary, "items": rows,
-            "raw": d["items"], "updated": d.get("updated")}
+    res = {"capital": capital, "summary": summary, "items": rows,
+           "raw": d["items"], "updated": d.get("updated")}
+    _CACHE.update({"ts": time.time(), "key": k, "res": res})
+    return res
 
 
 if __name__ == "__main__":

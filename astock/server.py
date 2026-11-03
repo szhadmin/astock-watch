@@ -26,8 +26,8 @@ from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import (ai_agent, altdata, backup, feed, holdings, market, memory, monitor,
-               paper, report, screener)
+from . import (ai_agent, altdata, backup, feed, holdings, mailer, market, memory,
+               monitor, paper, report, screener)
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -269,6 +269,13 @@ def run_phase(params):
         trader.phase_execute_plans()
     elif kind == "daily":
         res = report.build(cfg=cfg, verbose=True)
+        try:
+            mailer.send_digest("daily", journal=_latest_journal(),
+                               plans=trader._load_plans(),
+                               advices=_holdings_advice(),
+                               account=trader._snapshot(), cfg=cfg)
+        except Exception:
+            pass
         restore_cfg = None
         return {"report": {"html": res["html"], "md": res["md"],
                            "archive": res["archive"], "codes": res["codes"]}}
@@ -276,6 +283,21 @@ def run_phase(params):
         trader.run_once("auto")
     else:
         raise ValueError("未知任务 %s" % kind)
+    if kind in ("review", "plan"):
+        try:                                  # 复盘/次日计划 → 邮件
+            temp = None
+            try:
+                t = market.market_temp()
+                temp = {"temp": t["temp"], "level": t["level"],
+                        "note": market.gate(t)["note"]}
+            except Exception:
+                pass
+            mailer.send_digest(kind, journal=_latest_journal(),
+                               plans=trader._load_plans(),
+                               advices=_holdings_advice(),
+                               account=trader._snapshot(), temp=temp, cfg=cfg)
+        except Exception:
+            pass
     snap = trader._snapshot()
     try:
         backup.make_backup("phase-" + str(kind))   # 每轮决策/复盘后自动留档
@@ -723,6 +745,74 @@ def api_report_archive(_q):
     return {"items": report.archive_list(30)}
 
 
+def _latest_journal(limit=1500):
+    """最近一篇操盘日记的尾部内容（邮件正文用）。"""
+    d = os.path.join(BASE, "data", "ai", "journal")
+    try:
+        files = sorted(f for f in os.listdir(d) if f.endswith(".md"))
+        if not files:
+            return ""
+        with open(os.path.join(d, files[-1]), encoding="utf-8-sig") as f:
+            txt = f.read()
+        return txt[-limit:]
+    except Exception:
+        return ""
+
+
+def _holdings_advice():
+    """AI 上一次给真实持仓的操作建议。"""
+    p = os.path.join(BASE, "data", "holdings_advice.json")
+    try:
+        with open(p, encoding="utf-8-sig") as f:
+            return json.load(f).get("items") or []
+    except Exception:
+        return []
+
+
+def api_holdings_advice(_q):
+    p = os.path.join(BASE, "data", "holdings_advice.json")
+    try:
+        with open(p, encoding="utf-8-sig") as f:
+            return json.load(f)
+    except Exception:
+        return {"items": [], "ts": None,
+                "hint": "还没有建议。点「立即决策」或在盘中/收盘后自动决策一次即可生成。"}
+
+
+def api_mail_get(_q):
+    c = mailer.conf()
+    ok, why = mailer.available()
+    out = {k: v for k, v in c.items()}
+    if out.get("password"):
+        out["password"] = "****" + str(out["password"])[-4:]
+    out["ready"] = ok
+    out["status"] = why
+    return out
+
+
+def api_mail_save(body):
+    cfg = load_config()
+    cur = mailer.conf(cfg)
+    e = (cfg.setdefault("notify", {}).setdefault("email", {}))
+    for k in ("enabled", "smtp_host", "smtp_port", "use_ssl", "user", "to", "from_name"):
+        if k in body:
+            e[k] = body[k]
+    if "password" in body and not str(body["password"]).startswith("****"):
+        e["password"] = body["password"]
+    if "events" in body:
+        e["events"] = {**cur["events"], **(body["events"] or {})}
+    e["smtp_port"] = int(e.get("smtp_port") or 465)
+    with open(os.path.join(BASE, "config.json"), "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    ok, why = mailer.available(cfg)
+    return {"ok": True, "ready": ok, "status": why, "config": api_mail_get({})}
+
+
+def api_mail_test(_body):
+    ok, msg = mailer.test()
+    return {"ok": ok, "message": msg}
+
+
 def api_holdings(_q):
     """我的持仓：资金量 + 手工录入的股票与成本 + 逐只分析。"""
     try:
@@ -982,6 +1072,8 @@ GET_ROUTES = {
     "/api/altstatus": api_altstatus,
     "/api/altdata": api_altdata,
     "/api/holdings": api_holdings,
+    "/api/holdings_advice": api_holdings_advice,
+    "/api/mail": api_mail_get,
     "/api/lhb": api_lhb,
     "/api/report_archive": api_report_archive,
     "/api/job": api_job,
@@ -995,6 +1087,8 @@ POST_ROUTES = {
     "/api/reset": api_reset,
     "/api/backup": api_backup,
     "/api/holdings": api_holdings_save,
+    "/api/mail": api_mail_save,
+    "/api/mail/test": api_mail_test,
     "/api/restore": api_restore,
 }
 

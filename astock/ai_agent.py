@@ -20,8 +20,8 @@ import re
 import time
 from datetime import datetime
 
-from . import (altdata, feed, indicators as ind, llm as llm_mod, market, memory,
-               monitor, notify, paper, screener as scr)
+from . import (altdata, feed, holdings, indicators as ind, llm as llm_mod, mailer,
+               market, memory, monitor, notify, paper, screener as scr)
 from .notify import color
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -461,6 +461,27 @@ class AITrader:
                     item["基本面"] = txt
         except Exception:
             pass
+        # 我的真实持仓（只读参考，AI 的模拟盘照旧独立运作）
+        my_holds = []
+        try:
+            hd = holdings.load()
+            for h in (hd.get("items") or [])[:6]:
+                try:
+                    q = feed.get_quote(h["code"]) or {}
+                except Exception:
+                    q = {}
+                px = q.get("price")
+                my_holds.append({
+                    "code": h["code"], "name": h.get("name") or "",
+                    "股数": h["shares"], "成本": h["cost"],
+                    "现价": px,
+                    "浮动盈亏%": round((px / h["cost"] - 1) * 100, 2) if px and h["cost"] else None,
+                    "买入日期": h.get("date") or "", "备注": h.get("note") or "",
+                })
+            if my_holds:
+                print(color("  我的持仓 %d 只已并入决策参考" % len(my_holds), "grey"))
+        except Exception:
+            my_holds = []
         day["gate"] = gate_info
         day["force_plan"] = bool(force_plan)      # 收盘后复盘用：只出次日计划单，不成交
         payload = {
@@ -479,6 +500,13 @@ class AITrader:
             "行业板块强度(涨幅前列)": sector_rows,
             "风控收紧(代码已生效，不可违反)": gate_info,
             "板块强度过滤规则": market.sector_rules(self.ai_cfg),
+            "我的持仓(真实账户，AI 不能下单，只给建议)": my_holds,
+            "额外要求": ("若「我的持仓(真实账户)」非空，必须在 JSON 里额外输出 "
+                     "\"我的持仓操作建议\" 数组，每只一条："
+                     '{"code":"6位代码","name":"名称","建议":"持有|减仓|清仓|加仓",'
+                     '"触发位":"如跌破2.53清仓/站上2.74加仓","理由":"一句话具体理由"}。'
+                     "建议要务实可执行、必须有触发价，不许说\"视情况而定\"。"
+                     "这些是对真人账户的建议，不是模拟盘下单，不要和 actions 混在一起。"),
             "待执行计划单(昨日收盘时定下，今日开盘按规则执行)": self._load_plans(),
             "持仓": positions,
             "观察池": watch,
@@ -513,6 +541,19 @@ class AITrader:
 
         view = data.get("market_view") or ""
         print(color("  AI 市场判断：%s" % view, "cyan"))
+        # 我的持仓操作建议落盘（前端仪表盘与邮件都会用）
+        try:
+            adv = data.get("我的持仓操作建议") or []
+            if adv:
+                path = os.path.join(BASE, "data", "holdings_advice.json")
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump({"ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                               "items": adv,
+                               "market_view": data.get("market_view") or ""},
+                              f, ensure_ascii=False, indent=1)
+                print(color("  已生成 %d 只真实持仓的操作建议" % len(adv), "grey"))
+        except Exception as exc:
+            print(color("  （持仓建议保存失败：%s）" % exc, "yellow"))
         results = self._execute(data.get("actions") or [], snap, watch, day)
         memory.append_journal(
             "【操盘】%s\n%s\n执行：%s" % (view, data.get("journal", ""),
@@ -611,6 +652,11 @@ class AITrader:
             results.append(("✔ " if ok2 else "✘ ") + "%s %s → %s（%s）" % (code, act, msg, reason))
             if ok2:
                 notify.beep("warn")
+                try:
+                    mailer.send_trade(act, code, name, shares, px, px * shares,
+                                      reason, account=snap, cfg=self.cfg)
+                except Exception:
+                    pass
         return results
 
     # ---------------- 次日计划单 ----------------

@@ -52,6 +52,22 @@
       "enabled": false,
       "type": "wecom",
       "url": ""
+    },
+    "email": {
+      "enabled": false,
+      "smtp_host": "smtp.qq.com",
+      "smtp_port": 465,
+      "use_ssl": true,
+      "user": "",
+      "password": "",
+      "to": "",
+      "from_name": "astock-watch",
+      "events": {
+        "trade": true,
+        "review": true,
+        "plan": true
+      },
+      "_说明": "QQ/163 邮箱请用「授权码」而非登录密码；465 走 SSL，587 把 use_ssl 设为 false。开启后：买入/卖出成交、收盘复盘、次日计划都会发邮件。"
     }
   },
   "ai": {
