@@ -184,7 +184,22 @@ class PaperBroker:
             "profit_factor": round(gross_w / gross_l, 2) if gross_l else None,
             "max_drawdown_pct": round(mdd, 2),
             "total_fee": round(sum(t.get("fee") or 0 for t in self.state["trades"]), 2),
+            **self._excess_stats(),
         }
+
+    def _excess_stats(self):
+        """扣 beta：相对同期上证指数的超额收益（有指数记录才算）。"""
+        hist = [e for e in (self.state.get("equity_history") or [])
+                if e.get("index")]
+        if len(hist) < 2:
+            return {"index_return_pct": None, "excess_pct": None}
+        try:
+            idx_ret = (hist[-1]["index"] / hist[0]["index"] - 1) * 100
+            total = (hist[-1]["equity"] / self.state["capital"] - 1) * 100
+            return {"index_return_pct": round(idx_ret, 2),
+                    "excess_pct": round(total - idx_ret, 2)}
+        except Exception:
+            return {"index_return_pct": None, "excess_pct": None}
 
     def export_trades_csv(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)

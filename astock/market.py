@@ -93,6 +93,15 @@ def market_temp(verbose=False):
             score -= 4
             trend_txt = "震荡偏弱（跌破MA20）"
         detail["上证MA5/MA20"] = "%.1f / %.1f" % (ma5, ma20)
+        if len(closes) >= 21:
+            idx20 = round((closes[-1] / closes[-21] - 1) * 100, 2)
+            detail["指数20日涨跌%"] = idx20
+            if idx20 < -5:
+                detail["市场状态"] = "熊市"
+            elif idx20 > 5:
+                detail["市场状态"] = "牛市"
+            else:
+                detail["市场状态"] = "震荡"
     except Exception:
         pass
     detail["上证趋势"] = trend_txt
@@ -127,9 +136,15 @@ def stock_sectors(code, top=4):
 
 
 def gate(temp_info=None):
-    """把温度翻译成"收紧多少"的硬约束（供 ai_agent 直接执行）。"""
+    """把温度 + 市场状态翻译成"收紧多少"的硬约束（供 ai_agent 直接执行）。
+
+    依据（回放 29059 条样本，扣 beta 后 5 日超额）：
+        牛市 +1.81%｜熊市 +1.16%｜震荡 +0.05%
+        → 震荡市几乎没有超额，最该收紧；牛市可放宽；熊市靠抗跌但要小仓。
+    """
     t = (temp_info or market_temp())
     temp = t["temp"]
+    state = (t.get("detail") or {}).get("市场状态")
     if temp < 30:
         return {"mode": "freeze", "allow_new": False, "max_position_pct": 20.0,
                 "note": "大盘温度 %d（%s）：禁止开新仓，只管理现有持仓" % (temp, t["level"])}
@@ -137,6 +152,11 @@ def gate(temp_info=None):
         return {"mode": "tight", "allow_new": True, "max_position_pct": 25.0,
                 "note": "大盘温度 %d（%s）：收紧开仓，单股上限降至 25%%" % (temp, t["level"])}
     if temp < 60:
+        if state == "震荡":
+            return {"mode": "range", "allow_new": True, "max_position_pct": 28.0,
+                    "min_score": 65,
+                    "note": "大盘温度 %d（%s）·震荡市：历史超额≈0，收紧开仓并要求评分≥65"
+                            % (temp, t["level"])}
         return {"mode": "normal", "allow_new": True, "max_position_pct": 35.0,
                 "note": "大盘温度 %d（%s）：常规风控" % (temp, t["level"])}
     return {"mode": "loose", "allow_new": True, "max_position_pct": 40.0,

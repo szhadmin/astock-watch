@@ -27,7 +27,7 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AI_DIR = os.path.join(BASE, "data", "ai")
 PATH = os.path.join(AI_DIR, "hypotheses.jsonl")
 REPLAY_PATH = os.path.join(AI_DIR, "hypotheses_replay.jsonl")
-HORIZON = 5          # 观察 5 个交易日
+HORIZON = 10         # 观察期（交易日）：回放显示 10~20 日超额远高于 5 日
 MOVE_PCT = 1.0       # 涨/跌 1% 以上算"方向判断成立"
 
 

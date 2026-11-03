@@ -124,7 +124,8 @@
       "drop_weak": true,
       "min_candidates": 5,
       "_说明": "最强所属板块涨幅低于 weak_pct 视为弱势板块：候选池直接剔除、买入指令代码层拦截"
-    }
+    },
+    "horizon_days": 10
   },
   "report": {
     "keep_days": 60,

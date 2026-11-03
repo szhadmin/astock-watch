@@ -346,6 +346,16 @@ class AITrader:
         return {"大盘": [{"名称": i["name"], "点位": i["price"], "涨跌%": i["pct"]} for i in idx],
                 "时间": datetime.now().strftime("%Y-%m-%d %H:%M")}
 
+    def _index_close(self):
+        """上证指数最新收盘（用于扣 beta 记账，失败返回 None）。"""
+        try:
+            if not hasattr(self, "_idx_cache") or self._idx_cache is None:
+                bars = feed.get_index_kline("1.000001", 5)
+                self._idx_cache = bars[-1]["close"] if bars else None
+            return self._idx_cache
+        except Exception:
+            return None
+
     def _snapshot(self):
         prices = {}
         for code in list(self.broker.positions.keys()):
@@ -518,6 +528,11 @@ class AITrader:
             "行业板块强度(涨幅前列)": sector_rows,
             "风控收紧(代码已生效，不可违反)": gate_info,
             "板块强度过滤规则": market.sector_rules(self.ai_cfg),
+            "持有期指引(回放证据)": {
+                "结论": "扣费扣beta后的平均超额：5日+0.30%、10日+0.92%、20日+2.34%",
+                "要求": "默认目标持有 %d~20 个交易日；不要为了 1~2 个点的波动反复进出"
+                        % int((self.ai_cfg or {}).get("horizon_days") or 10),
+            },
             "我的持仓(真实账户，AI 不能下单，只给建议)": my_holds,
             "额外要求": ("若「我的持仓(真实账户)」非空，必须在 JSON 里额外输出 "
                      "\"我的持仓操作建议\" 数组，每只一条："
@@ -582,7 +597,8 @@ class AITrader:
         except Exception as exc:
             print(color("  （假设记录失败：%s）" % exc, "yellow"))
         self._write_report("decide", payload, data, results, usage)
-        self.broker.record_equity(self._snapshot())
+        self.broker.record_equity(self._snapshot(),
+                                  extra={"index": self._index_close()})
         return data
 
     def _execute(self, actions, snap, watch, day):
@@ -809,6 +825,8 @@ class AITrader:
             "task": "review",
             "date": today,
             "账户与绩效": {"总权益": snap["equity"], "累计收益%": snap["total_return_pct"],
+                       "同期指数%": stats.get("index_return_pct"),
+                       "相对指数超额%": stats.get("excess_pct"),
                        **{k: v for k, v in stats.items() if k != "equity"}},
             "今日成交": today_trades,
             "当前持仓": [{k: p[k] for k in ("code", "name", "shares", "cost", "price",
