@@ -55,7 +55,7 @@
     }
   },
   "ai": {
-    "_说明": "provider: openai | custom | deepseek | ollama。真实模型必须填 base_url / model / api_key（本地 ollama 可空 key）。max_tokens_* 为各阶段输出额度，思考型模型需留足。",
+    "_说明": "provider: openai | custom | deepseek | ollama。真实模型必须填 base_url / model / api_key（本地 ollama 可空 key）。max_tokens_* 为各阶段输出额度，思考型模型需留足。｜sector_filter 为板块强度过滤｜schedule.report_at 为日报自动生成时间",
     "provider": "custom",
     "api_key": "",
     "model": "",
@@ -91,12 +91,26 @@
       "enabled": true,
       "decide_every_min": 30,
       "pick_at": "15:12",
-      "review_at": "15:05"
+      "review_at": "15:05",
+      "report_at": "15:20"
     },
     "execution": {
       "_说明": "下单执行策略：非交易时段只生成计划单，次日开盘执行（避免用收盘价事后成交）",
       "defer_outside_session": true,
       "cancel_if_gap_pct": 1.5
+    },
+    "use_altdata": true,
+    "tushare_token": "",
+    "sector_filter": {
+      "enabled": true,
+      "weak_pct": -1.5,
+      "drop_weak": true,
+      "min_candidates": 5,
+      "_说明": "最强所属板块涨幅低于 weak_pct 视为弱势板块：候选池直接剔除、买入指令代码层拦截"
     }
+  },
+  "report": {
+    "keep_days": 60,
+    "_说明": "每日 HTML 日报自动生成到 data/reports/archive/<日期>/，保留天数"
   }
 }
