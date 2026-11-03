@@ -1,0 +1,47 @@
+# astock-watch 一键部署
+#
+#   cp config.example.json config.json   # 填好 ai.api_key 后再启动
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# 打开 http://127.0.0.1:8770
+
+services:
+  astock:
+    build:
+      context: .
+      args:
+        # 需要财报/股东/龙虎榜时改成 1（镜像会大一些，约 +600MB）
+        WITH_AKSHARE: "0"
+    image: astock-watch:latest
+    container_name: astock-watch
+    restart: unless-stopped
+
+    ports:
+      # 默认只绑本机，最安全。要远程访问改成 "8770:8770"，
+      # 并且务必在前面加一层带鉴权的反向代理（见 docs/Docker部署.md）
+      - "127.0.0.1:8770:8770"
+
+    environment:
+      TZ: Asia/Shanghai
+      PORT: "8770"
+
+    volumes:
+      # 配置（含模型密钥）：只读挂载，容器无法改它
+      - ./config.json:/app/config.json:ro
+      # 数据：账户/成交/AI 记忆/规则库/回放样本/日报归档 —— 必须持久化
+      - ./data:/app/data
+      - ./backups:/app/backups
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8770/api/overview',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 6s
+      start_period: 25s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,33 @@
+# 构建上下文排除项（减小镜像、避免泄露个人数据）
+.git
+.gitignore
+.github
+__pycache__/
+*.py[cod]
+*.log
+replay_*.log
+replay_*.err.log
+
+# 个人数据与密钥：绝不进镜像
+config.json
+data/
+backups/
+*.bak
+*.tmp
+
+# 本机脚本与文档产物
+启动*.bat
+分析.bat
+盯盘.bat
+一览.bat
+报告.bat
+自检.bat
+诊断.bat
+AI操盘.bat
+AI状态与风控自检.bat
+
+node_modules/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

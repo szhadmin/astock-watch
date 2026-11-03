@@ -1,0 +1,4 @@
+# 可选依赖：只用于「财报 / 股东户数 / 龙虎榜」（akshare）
+# 核心分析与 AI 操盘零依赖，不需要装这些。
+# 启用方式：docker build --build-arg WITH_AKSHARE=1 -t astock-watch:full .
+akshare>=1.20.0
