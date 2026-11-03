@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
-"""可选扩展数据：财报 / 股东 / 龙虎榜（akshare 或 tushare）。
+"""可选扩展数据：财报 / 股东户数 / 龙虎榜（akshare 或 tushare）。
 
-设计原则：**不装也能跑**。
-    · 两个库都是可选的，未安装时本模块返回 None，全系统照常运行；
-    · 装了以后自动启用，数据带缓存（默认 6 小时）落到 data/altdata/<code>.json；
-    · 给 AI 的只是"紧凑摘要"（几行字），不会把整张财报塞进提示词。
+实测可用的 akshare 接口（v1.20+）：
+    stock_financial_abstract(symbol)      财务摘要：行=指标，列=报告期
+    stock_zh_a_gdhs_detail_em(symbol)     股东户数详情（按截止日，需取最近几期）
+    stock_lhb_detail_em(start, end)       龙虎榜明细（整段时间全市场，按代码过滤；带进程内缓存）
 
-安装（任选其一）：
-    pip install akshare                # 免费、免 token
-    pip install tushare                # 需要在 config.json → ai.tushare_token 填 token
+设计原则：**不装也能跑**，未安装时返回 None，系统照常运行。
 """
 from __future__ import annotations
 
@@ -20,6 +18,7 @@ from datetime import datetime, timedelta
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(BASE, "data", "altdata")
 TTL_SEC = 6 * 3600
+_LHB_CACHE = {"ts": 0.0, "df": None, "span": None}
 
 
 def _try_import(name):
@@ -32,11 +31,16 @@ def _try_import(name):
 def status():
     ak = _try_import("akshare")
     ts = _try_import("tushare")
-    return {"akshare": bool(ak), "tushare": bool(ts),
-            "note": ("已安装：" + "、".join([n for n, v in
-                                           (("akshare", ak), ("tushare", ts)) if v])
-                     if (ak or ts) else
-                     "未安装扩展数据源（可选）。需要财报/股东/龙虎榜时：pip install akshare")}
+    ver = ""
+    if ak:
+        try:
+            ver = " v" + ak.__version__
+        except Exception:
+            ver = ""
+    note = ("已安装：" + "、".join(n for n, v in (("akshare", ak), ("tushare", ts)) if v)
+            + "（已自动启用，数据缓存 6 小时）") if (ak or ts) else \
+        "未安装扩展数据源（可选）。需要财报/股东/龙虎榜时：pip install akshare"
+    return {"akshare": bool(ak), "tushare": bool(ts), "version": ver, "note": note}
 
 
 # --------------------------------------------------------------------------- #
@@ -54,9 +58,7 @@ def _read_cache(code):
     try:
         with open(p, encoding="utf-8-sig") as f:
             d = json.load(f)
-        if time.time() - d.get("_ts", 0) > TTL_SEC:
-            return None
-        return d
+        return None if time.time() - d.get("_ts", 0) > TTL_SEC else d
     except Exception:
         return None
 
@@ -71,66 +73,126 @@ def _write_cache(code, data):
 
 
 # --------------------------------------------------------------------------- #
-# akshare 取数
+# akshare：财务摘要（实测列结构：选项 / 指标 / 20260930 / 20260630 …）
 # --------------------------------------------------------------------------- #
-def _ak_financial(ak, code):
-    """最近几期财务摘要：营收、净利、同比。"""
+FIN_KEYS = ["营业总收入", "归母净利润", "净利润", "扣非净利润",
+            "基本每股收益", "净资产收益率", "销售毛利率", "资产负债率"]
+
+
+def _ak_financial(ak, code, periods=2):
     try:
-        df = ak.stock_financial_abstract(symbol=code)
+        df = ak.stock_financial_abstract(symbol=str(code))
     except Exception:
         return None
+    if df is None or df.empty:
+        return None
+    date_cols = [c for c in df.columns if str(c).isdigit() and len(str(c)) == 8][:periods]
+    if not date_cols:
+        return None
+    rows = []
     try:
-        cols = [c for c in df.columns]
-        date_col = "选项" if "选项" in cols else cols[0]
-        rows = []
-        want = {"归母净利润": None, "营业总收入": None, "净利润": None}
-        for _, r in df.head(24).iterrows():
-            name = str(r[date_col])
-            for k in want:
-                if k in name and want[k] is None:
-                    vals = [(c, r[c]) for c in cols[1:6] if str(r[c]) not in ("nan", "None")]
-                    want[k] = vals
-        for label, vals in want.items():
+        for _, r in df.iterrows():
+            name = str(r.get("指标") or "")
+            hit = next((k for k in FIN_KEYS if k in name), None)
+            if not hit:
+                continue
+            # 金额类指标换算成 亿/万，比率类（每股收益/ROE/毛利率/负债率）保留原值
+            money_like = ("净利润", "营业总收入", "收入", "利润")
+            is_money = any(k in name for k in money_like)
+            vals = []
+            for c in date_cols:
+                v = r.get(c)
+                s = str(v)
+                if s in ("nan", "None", "--", ""):
+                    continue
+                try:
+                    num = float(v)
+                    if is_money:
+                        if abs(num) >= 1e8:
+                            s = "%.2f 亿" % (num / 1e8)
+                        elif abs(num) >= 1e4:
+                            s = "%.1f 万" % (num / 1e4)
+                        else:
+                            s = "%.2f" % num
+                    else:
+                        s = "%.4f" % num
+                except (TypeError, ValueError):
+                    pass
+                vals.append({"报告期": str(c), "值": s})
             if vals:
-                rows.append({"项": label,
-                             "期": [{"报告期": str(p), "值": v} for p, v in vals[:3]]})
+                rows.append({"项": name.replace("(元)", "").strip(), "期": vals})
+            if len(rows) >= 6:
+                break
+    except Exception:
+        return None
+    return rows or None
+
+
+# --------------------------------------------------------------------------- #
+# akshare：股东户数（按截止日升序，取最近 3 期）
+# --------------------------------------------------------------------------- #
+def _ak_holders(ak, code, periods=3):
+    try:
+        df = ak.stock_zh_a_gdhs_detail_em(symbol=str(code))
+    except Exception:
+        return None
+    if df is None or df.empty:
+        return None
+    try:
+        df = df.sort_values("股东户数统计截止日")
+        rows = []
+        for _, r in df.tail(periods).iloc[::-1].iterrows():
+            rows.append({"截止日": str(r.get("股东户数统计截止日")),
+                         "股东户数": str(r.get("股东户数-本次")),
+                         "较上期%": str(round(float(r.get("股东户数-增减比例") or 0), 2)),
+                         "户均持股市值万": str(round(float(r.get("户均持股市值") or 0) / 1e4, 1))})
         return rows or None
     except Exception:
         return None
 
 
-def _ak_holders(ak, code):
+# --------------------------------------------------------------------------- #
+# akshare：龙虎榜（全市场一次拉取，进程内缓存 30 分钟）
+# --------------------------------------------------------------------------- #
+def _lhb_df(ak, days=30):
+    now = time.time()
+    if _LHB_CACHE["df"] is not None and now - _LHB_CACHE["ts"] < 1800 \
+            and _LHB_CACHE["span"] == days:
+        return _LHB_CACHE["df"]
     try:
-        df = ak.stock_zh_a_gdhs_detail_em(symbol=code)
-        out = []
-        for _, r in df.head(3).iterrows():
-            out.append({"截止日": str(r.get("股东户数统计截止日", "")),
-                        "股东户数": str(r.get("股东户数-本次", "")),
-                        "较上期%": str(r.get("股东户数-增减比例", ""))})
-        return out or None
+        end = datetime.now().strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+        df = ak.stock_lhb_detail_em(start_date=start, end_date=end)
+        _LHB_CACHE.update({"ts": now, "df": df, "span": days})
+        return df
     except Exception:
         return None
 
 
-def _ak_lhb(ak, code):
-    """近 30 天龙虎榜。"""
+def _ak_lhb(ak, code, days=30, limit=3):
+    df = _lhb_df(ak, days)
+    if df is None or df.empty:
+        return None
     try:
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
-        df = ak.stock_lhb_detail_em(start_date=start, end_date=end)
-        df = df[df["代码"].astype(str).str.zfill(6) == str(code).zfill(6)]
-        out = []
-        for _, r in df.head(3).iterrows():
-            out.append({"日期": str(r.get("上榜日", "")),
-                        "解读": str(r.get("解读", "")),
-                        "净买额万": str(r.get("龙虎榜净买额", ""))})
-        return out or None
+        sub = df[df["代码"].astype(str).str.zfill(6) == str(code).zfill(6)]
+        if sub.empty:
+            return None
+        sub = sub.sort_values("上榜日").iloc[::-1].head(limit)
+        rows = []
+        for _, r in sub.iterrows():
+            net = float(r.get("龙虎榜净买额") or 0) / 1e4
+            rows.append({"日期": str(r.get("上榜日")),
+                         "解读": str(r.get("解读") or ""),
+                         "净买额万": round(net, 1),
+                         "上榜原因": str(r.get("上榜原因") or "")[:30],
+                         "涨跌幅%": round(float(r.get("涨跌幅") or 0), 2)})
+        return rows or None
     except Exception:
         return None
 
 
 # --------------------------------------------------------------------------- #
-# tushare 取数
+# tushare（可选）
 # --------------------------------------------------------------------------- #
 def _ts_client(token):
     ts = _try_import("tushare")
@@ -149,21 +211,8 @@ def _ts_financial(pro, code):
         df = pro.fina_indicator(ts_code="%s.%s" % (code, suffix),
                                 fields="end_date,roe,netprofit_yoy,or_yoy,grossprofit_margin",
                                 limit=4)
-        return [{"报告期": r["end_date"], "ROE": r.get("roe"),
-                 "净利同比%": r.get("netprofit_yoy"), "营收同比%": r.get("or_yoy"),
-                 "毛利率%": r.get("grossprofit_margin")}
+        return [{"项": "ROE", "期": [{"报告期": r["end_date"], "值": str(r.get("roe"))}]}
                 for _, r in df.iterrows()] or None
-    except Exception:
-        return None
-
-
-def _ts_lhb(pro, code):
-    try:
-        end = datetime.now().strftime("%Y%m%d")
-        start = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
-        df = pro.top_list(ts_code=code, start_date=start, end_date=end)
-        return [{"日期": r["trade_date"], "净买额万": r.get("net_amount"),
-                 "解读": "龙虎榜"} for _, r in df.head(3).iterrows()] or None
     except Exception:
         return None
 
@@ -171,14 +220,14 @@ def _ts_lhb(pro, code):
 # --------------------------------------------------------------------------- #
 # 对外接口
 # --------------------------------------------------------------------------- #
-def brief(code, token="", use=True):
-    """返回 {source, financial, holders, lhb} 或 None（不可用/未启用）。"""
+def brief(code, token="", use=True, force=False):
     if not use:
         return None
-    cached = _read_cache(code)
-    if cached:
-        cached.pop("_ts", None)
-        return cached
+    if not force:
+        cached = _read_cache(code)
+        if cached:
+            cached.pop("_ts", None)
+            return cached
     ak = _try_import("akshare")
     data = {"source": None, "financial": None, "holders": None, "lhb": None,
             "updated": datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -192,7 +241,6 @@ def brief(code, token="", use=True):
         if pro:
             data["source"] = "tushare"
             data["financial"] = _ts_financial(pro, code)
-            data["lhb"] = _ts_lhb(pro, code)
     if not data["source"]:
         return None
     _write_cache(code, data)
@@ -205,23 +253,40 @@ def compact(code, token="", use=True):
     b = brief(code, token, use)
     if not b:
         return None
-    lines = []
-    if b.get("financial"):
-        for row in b["financial"][:2]:
-            per = "、".join("%s:%s" % (p["报告期"], p["值"]) for p in (row.get("期") or [])[:2])
-            if per:
-                lines.append("%s %s" % (row.get("项"), per))
+    parts = []
+    for row in (b.get("financial") or [])[:3]:
+        per = "、".join("%s:%s" % (p["报告期"], p["值"]) for p in (row.get("期") or [])[:2])
+        if per:
+            parts.append("%s %s" % (row["项"], per))
     if b.get("holders"):
         h = b["holders"][0]
-        lines.append("股东户数 %s（截至 %s，较上期 %s%%）"
+        parts.append("股东户数 %s（%s，环比 %s%%）"
                      % (h.get("股东户数"), h.get("截止日"), h.get("较上期%")))
     if b.get("lhb"):
         l = b["lhb"][0]
-        lines.append("近30日龙虎榜：%s %s 净买额%s万" % (l.get("日期"), l.get("解读", ""),
-                                                l.get("净买额万")))
-    return "；".join(lines) if lines else None
+        parts.append("近30日龙虎榜 %s：%s，净买 %.1f 万"
+                     % (l.get("日期"), (l.get("解读") or "")[:24], l.get("净买额万") or 0))
+    return "；".join(parts) if parts else None
+
+
+def ingest(codes, token="", force=True, verbose=True):
+    """把一批股票的扩展数据抓取入库（data/altdata/<code>.json）。"""
+    out = {}
+    for c in codes:
+        try:
+            b = brief(c, token=token, use=True, force=force)
+            out[c] = "ok" if b else "empty"
+            if verbose:
+                print("  %s %s" % (c, "✔ " + compact(c) if b else "· 无数据"))
+        except Exception as exc:                      # noqa: BLE001
+            out[c] = "fail: %s" % exc
+            if verbose:
+                print("  %s ✘ %s" % (c, exc))
+    return out
 
 
 if __name__ == "__main__":
+    import sys
     print(json.dumps(status(), ensure_ascii=False))
-    print(json.dumps(compact("600015"), ensure_ascii=False))
+    codes = sys.argv[1:] or ["600015"]
+    print(json.dumps(ingest(codes), ensure_ascii=False, indent=1))

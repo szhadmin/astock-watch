@@ -85,6 +85,9 @@ def main():
     checks.append(("提示词含「大盘温度」", "大盘温度" in p and p.get("大盘温度")))
     checks.append(("提示词含「行业板块强度」", bool(p.get("行业板块强度(涨幅前列)"))))
     checks.append(("提示词含「风控收紧」", "风控收紧(代码已生效，不可违反)" in p))
+    checks.append(("提示词含「基本面」(akshare 已装)",
+                   any("基本面" in (x or {}) for x in (p.get("持仓") or []) + (p.get("观察池") or []))))
+    checks.append(("提示词含板块过滤规则", "板块强度过滤规则" in p))
     checks.append(("提示词含个股所属板块",
                    any("所属板块" in (x or {}) for x in (p.get("持仓") or []) + (p.get("观察池") or []))))
     ok = all(c[1] for c in checks)

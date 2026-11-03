@@ -873,6 +873,13 @@ const App = (() => {
           <div class="dim">累计手续费 ${money(st.total_fee)} 元</div></div>
       </div>
       <div class="card" style="margin-top:14px"><h3>权益曲线</h3>${chart(eq.equity)}</div>
+      <div class="card" style="margin-top:14px"><h3>每日报告归档</h3>
+        <div id="archive-body" class="dim">加载中…</div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn" onclick="App.run('daily')">立即生成今日日报</button>
+          <span class="dim" style="font-size:12px">每天 15:20 自动生成并归档到 data/reports/archive/&lt;日期&gt;/</span>
+        </div>
+      </div>
 
       <div class="two-col" style="margin-top:14px">
         <div class="card"><h3>交易日记</h3>
@@ -899,6 +906,22 @@ const App = (() => {
         </div>
       </div>
       <div class="card hidden" id="doc-view" style="margin-top:14px"><h3 id="doc-title"></h3><pre id="doc-body"></pre></div>`;
+    loadArchive();
+  }
+
+  async function loadArchive() {
+    const box = $('archive-body');
+    if (!box) return;
+    try {
+      const r = await api('/api/report_archive');
+      const items = r.items || [];
+      box.innerHTML = items.length
+        ? `<table><thead><tr><th>日期</th><th>文件数</th><th>报告</th></tr></thead><tbody>
+            ${items.map(i => `<tr><td class="l mono">${esc(i.date)}</td><td>${i.files}</td>
+              <td class="l">${i.html ? `<a href="/reports/archive/${esc(i.date)}/daily_${esc(i.date)}.html" target="_blank">打开 HTML</a>` : '<span class="dim">-</span>'}</td></tr>`).join('')}
+           </tbody></table>`
+        : '<div class="dim">还没有日报。点下方按钮生成，或等 15:20 自动生成。</div>';
+    } catch (e) { box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>'; }
   }
 
   async function showJournal(date) {
@@ -1026,6 +1049,7 @@ const App = (() => {
           <button class="btn" onclick="App.run('pick')">AI 选股</button>
           <button class="btn primary" onclick="App.run('decide')">AI 决策</button>
           <button class="btn" onclick="App.run('review')">收盘复盘</button>
+          <button class="btn" onclick="App.run('daily')">生成日报</button>
           <span class="spacer"></span>
           <button class="btn" onclick="App.reset()">重置模拟盘</button>
         </div>
@@ -1260,6 +1284,7 @@ const App = (() => {
     route, run, watchJob, closeJob, reset, saveConfig, saveSchedule, ping,
     showDecision, showPrompt, showReport, showJournal, showPb, showFailed,
     addWatch, saveWatch, openKline, selectJob, setKlinePeriod, setKlineDays,
-    toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore
+    toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore,
+    loadArchive
   };
 })();

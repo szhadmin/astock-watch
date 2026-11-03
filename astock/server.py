@@ -26,7 +26,8 @@ from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import ai_agent, altdata, backup, feed, market, memory, monitor, paper, screener
+from . import (ai_agent, altdata, backup, feed, market, memory, monitor, paper,
+               report, screener)
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,7 +38,8 @@ _QUOTE_CACHE = {"ts": 0.0, "data": {}}
 _CAND_CACHE = {"ts": 0.0, "data": None, "running": False}
 
 DEFAULT_SCHEDULE = {"enabled": True, "decide_every_min": 30,
-                    "pick_at": "15:12", "review_at": "15:05"}
+                    "pick_at": "15:12", "review_at": "15:05",
+                    "report_at": "15:20"}
 
 ALLOWED_AI_KEYS = {"provider", "api_key", "model", "base_url", "temperature",
                    "max_tokens", "timeout_sec", "bars_in_prompt",
@@ -262,6 +264,11 @@ def run_phase(params):
         trader.phase_review()
     elif kind == "execute":
         trader.phase_execute_plans()
+    elif kind == "daily":
+        res = report.build(cfg=cfg, verbose=True)
+        restore_cfg = None
+        return {"report": {"html": res["html"], "md": res["md"],
+                           "archive": res["archive"], "codes": res["codes"]}}
     elif kind == "auto":
         trader.run_once("auto")
     else:
@@ -280,7 +287,8 @@ def scan_candidates(params):
     """后台跑选股初筛（全市场快照 + 60 只 K 线），结果缓存给前端。"""
     global _CAND_CACHE
     try:
-        feats = screener.screen((load_config().get("ai") or {}).get("screen"))
+        ai_cfg = load_config().get("ai") or {}
+        feats = screener.screen({**(ai_cfg.get("screen") or {}), "_ai_cfg": ai_cfg})
         _CAND_CACHE = {"ts": time.time(), "data": feats, "running": False}
         print("候选池就绪：%d 只" % len(feats))
         return {"count": len(feats)}
@@ -326,6 +334,7 @@ class Scheduler(threading.Thread):
         self.last_pick_day = ""
         self.last_review_day = ""
         self.last_exec_day = ""
+        self.last_report_day = ""
         self.last_equity_ts = 0.0
         self.enabled = True
 
@@ -385,6 +394,11 @@ class Scheduler(threading.Thread):
                 and not self._job_running(("pick", "scan")) and not _picked_today(today):
             self.last_pick_day = today
             start_job("pick", run_phase, {"kind": "pick"})
+        # 收盘后自动生成日报并归档
+        if at_or_after(sch.get("report_at", "15:20")) and self.last_report_day != today \
+                and not self._job_running(("daily",)):
+            self.last_report_day = today
+            start_job("daily", run_phase, {"kind": "daily"})
         # 盘中定时决策
         if monitor.in_session(now) \
                 and time.time() - self.last_decide >= float(sch["decide_every_min"]) * 60 \
@@ -642,7 +656,7 @@ def api_config_set(body):
 
 def api_run(body):
     kind = (body.get("kind") or "").strip()
-    if kind not in ("pick", "decide", "review", "auto", "scan", "execute"):
+    if kind not in ("pick", "decide", "review", "auto", "scan", "execute", "daily"):
         return None, "未知任务类型"
     if kind == "scan":
         return api_scan(body)
@@ -692,6 +706,11 @@ def api_market(_q):
                          "main_in_wan": round(s["main_in"] / 1e4, 0),
                          "up": s["up"], "down": s["down"],
                          "leader": s["leader"]} for s in sectors]}
+
+
+def api_report_archive(_q):
+    """已归档的日报列表（按日期倒序）。"""
+    return {"items": report.archive_list(30)}
 
 
 def api_altstatus(_q):
@@ -894,6 +913,7 @@ GET_ROUTES = {
     "/api/backups": api_backups,
     "/api/market": api_market,
     "/api/altstatus": api_altstatus,
+    "/api/report_archive": api_report_archive,
     "/api/job": api_job,
     "/api/jobs": api_jobs,
 }
@@ -949,6 +969,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html")
         if path.startswith("/static/"):
             return self._static(path[len("/static/"):])
+        if path.startswith("/reports/"):
+            return self._report_file(path[len("/reports/"):])
         fn = GET_ROUTES.get(path)
         if fn:
             try:
@@ -966,6 +988,23 @@ class Handler(BaseHTTPRequestHandler):
                  "text/css; charset=utf-8" if name.endswith(".css") else
                  "application/javascript; charset=utf-8" if name.endswith(".js") else
                  "application/octet-stream")
+        with open(p, "rb") as f:
+            data = f.read()
+        self._send(200, data, ctype)
+
+    def _report_file(self, rel):
+        """只允许访问 data/reports 下的文件（防目录穿越）。"""
+        rel = rel.replace("\\", "/")
+        if ".." in rel or rel.startswith("/"):
+            return self._json({"error": "bad path"}, 400)
+        root = os.path.join(BASE, "data", "reports")
+        p = os.path.abspath(os.path.join(root, rel))
+        if not p.startswith(os.path.abspath(root)) or not os.path.isfile(p):
+            return self._json({"error": "not found"}, 404)
+        ctype = ("text/html; charset=utf-8" if p.endswith(".html") else
+                 "image/svg+xml" if p.endswith(".svg") else
+                 "text/markdown; charset=utf-8" if p.endswith(".md") else
+                 "text/plain; charset=utf-8")
         with open(p, "rb") as f:
             data = f.read()
         self._send(200, data, ctype)

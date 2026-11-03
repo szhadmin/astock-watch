@@ -340,6 +340,29 @@ pip install tushare       # 需在 config.json → ai.use_altdata 与 ai.tushare
 
 ---
 
+### 12.4 板块强度过滤（弱势板块直接不看）
+
+config.json → ai.sector_filter 控制（已默认开启）：
+
+| 参数 | 默认 | 含义 |
+|---|---|---|
+| enabled | true | 是否启用 |
+| weak_pct | -1.5 | 个股**最强所属板块**当日涨幅低于该值 → 视为弱势板块 |
+| drop_weak | true | 选股候选池直接剔除；观察池剔除；**买入指令在代码层被拒** |
+| min_candidates | 5 | 过滤后至少保留的候选数（防止池子被清空） |
+
+提示词里也会带上过滤规则，但真正的拦截在 i_agent._execute 与 screener.screen 里执行。
+
+### 12.5 日报自动生成与归档
+
+`ash
+python main.py daily                  # 手动：生成 md + html（内嵌 SVG）+ 归档
+`
+- 调度器每天 schedule.report_at（默认 **15:20**）自动生成；
+- 归档路径 data/reports/archive/<日期>/（含 md、html、各票 svg），保留 
+eport.keep_days（默认 60 天）；
+- Web「复盘 → 每日报告归档」可直接点开当天 HTML；静态地址 /reports/archive/<日期>/daily_<日期>.html。
+
 ## 10. 开源与许可
 
 - **License**：MIT（见 [LICENSE](LICENSE)）；另附投资风险提示，使用前请阅读。

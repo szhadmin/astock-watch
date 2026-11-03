@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from . import feed, indicators as ind
+from . import feed, indicators as ind, market
 
 DEFAULT_SCREEN = {
     "universe_size": 300,       # 按成交额取前 N 只作为视野
@@ -152,7 +152,14 @@ def screen(cfg_screen=None, verbose=True):
         feats.append(f)
 
     feats.sort(key=lambda x: -x["screen_score"])
-    return feats[:int(sc["top"])]
+    feats = feats[:int(sc["top"])]
+    # 板块强度过滤：弱势板块的票直接不看（可在 config.ai.sector_filter 调整）
+    try:
+        feats = market.annotate_and_filter(feats, (cfg_screen or {}).get("_ai_cfg"), verbose=verbose)
+    except Exception as exc:                          # noqa: BLE001
+        if verbose:
+            print("  （板块强度过滤跳过：%s）" % exc)
+    return feats
 
 
 def brief_for_ai(feats):
@@ -170,5 +177,6 @@ def brief_for_ai(feats):
             "量能倍数": f["vol_ratio5"], "ATR%": f["atr_pct"],
             "近20日支撑": f["support20"], "前20日高点": f["high20_prev"],
             "5日涨幅%": f["chg5"], "形态": f["category"],
+            "所属板块": f.get("sector"), "板块涨幅%": f.get("sector_pct"),
         })
     return out

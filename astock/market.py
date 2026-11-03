@@ -144,6 +144,94 @@ def gate(temp_info=None):
                     % (temp, t["level"])}
 
 
+
+# --------------------------------------------------------------------------- #
+# 板块强度过滤：弱势板块直接不看（结果带缓存，避免打爆接口）
+# --------------------------------------------------------------------------- #
+_SECTOR_CACHE = {"ts": 0.0, "map": {}}
+SECTOR_TTL = 300.0     # 5 分钟
+
+
+DEFAULT_SECTOR_RULES = {
+    "enabled": True,
+    "weak_pct": -1.5,      # 最强所属板块涨幅低于此值 → 视为弱势板块
+    "drop_weak": True,     # 选股/观察池里直接剔除弱势板块标的
+    "min_candidates": 5,   # 过滤后至少保留这么多候选
+}
+
+
+def sector_rules(cfg_ai=None):
+    r = dict(DEFAULT_SECTOR_RULES)
+    r.update(((cfg_ai or {}).get("sector_filter") or {}))
+    return r
+
+
+def _sector_map(codes, force=False):
+    """批量取所属板块并缓存 {code: {"name","pct"}}。"""
+    import time as _t
+    now = _t.time()
+    if force or now - _SECTOR_CACHE["ts"] > SECTOR_TTL:
+        _SECTOR_CACHE["map"] = {}
+        _SECTOR_CACHE["ts"] = now
+    todo = [c for c in codes if c and c not in _SECTOR_CACHE["map"]]
+    for c in todo[:40]:                     # 单次最多抓 40 只，控制耗时
+        try:
+            rows = stock_sectors(c, top=3)
+        except Exception:
+            rows = []
+        if rows:
+            best = max(rows, key=lambda x: x.get("pct") or -99)
+            _SECTOR_CACHE["map"][c] = {"name": best.get("name"),
+                                       "pct": round(best.get("pct") or 0, 2),
+                                       "all": [{"name": r["name"], "pct": r["pct"]} for r in rows]}
+        else:
+            _SECTOR_CACHE["map"][c] = None
+    return {c: _SECTOR_CACHE["map"].get(c) for c in codes}
+
+
+def sector_of(code):
+    """个股最强所属板块：{"name","pct","all"} 或 None。"""
+    return _sector_map([code]).get(code)
+
+
+def is_weak(code, weak_pct=-1.5):
+    """是否处于弱势板块。返回 (weak: bool, name, pct)。"""
+    info = sector_of(code)
+    if not info:
+        return False, "-", None            # 拿不到数据就不拦（宁可放过）
+    pct = info.get("pct")
+    return (pct is not None and pct < weak_pct), info.get("name") or "-", pct
+
+
+def annotate_and_filter(feats, cfg_ai=None, verbose=False):
+    """给候选打上板块标签，并按阈值剔除弱势板块标的。"""
+    rules = sector_rules(cfg_ai)
+    if not rules["enabled"] or not feats:
+        return feats
+    codes = [f["code"] for f in feats]
+    mp = _sector_map(codes)
+    kept, dropped = [], []
+    for f in feats:
+        info = mp.get(f["code"])
+        if info:
+            f["sector"] = info["name"]
+            f["sector_pct"] = info["pct"]
+        pct = (info or {}).get("pct")
+        weak = pct is not None and pct < float(rules["weak_pct"])
+        if weak and rules["drop_weak"]:
+            dropped.append(f)
+        else:
+            kept.append(f)
+    if len(kept) < int(rules["min_candidates"]):     # 别把池子清空
+        kept = feats
+        dropped = []
+    if verbose and dropped:
+        print("  板块强度过滤：剔除 %d 只弱势板块标的（%s）"
+              % (len(dropped), "、".join("%s(%+.1f%%)" % (f["code"], f.get("sector_pct") or 0)
+                                        for f in dropped[:5])))
+    return kept
+
+
 if __name__ == "__main__":
     print(json.dumps(market_temp(verbose=True), ensure_ascii=False, indent=1))
     print("gate:", json.dumps(gate(), ensure_ascii=False))

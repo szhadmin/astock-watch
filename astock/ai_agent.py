@@ -342,7 +342,8 @@ class AITrader:
     def phase_pick(self, verbose=True):
         if verbose:
             print(color("\n【① 选股会】规则初筛中…", "bold"))
-        feats = scr.screen((self.cfg.get("ai") or {}).get("screen"))
+        ai_cfg = self.cfg.get("ai") or {}
+        feats = scr.screen({**(ai_cfg.get("screen") or {}), "_ai_cfg": ai_cfg})
         if not feats:
             print(color("  候选池为空（可能非交易时段或接口异常）", "yellow"))
             return None
@@ -410,6 +411,17 @@ class AITrader:
                 item = {"code": code, "name": q.get("name"), "现价": q.get("price"),
                         "今日涨跌%": q.get("pct"), "成交额亿": round((q.get("amount") or 0) / 1e8, 2)}
                 item.update(self._bars_brief(code))
+                try:
+                    weak, sname, spct = market.is_weak(
+                        code, market.sector_rules(self.ai_cfg)["weak_pct"])
+                    item["所属板块"] = "%s(%+.2f%%)" % (sname, spct if spct is not None else 0)
+                    if weak:
+                        item["⚠板块"] = "所属板块弱势，按规则不看"
+                        print(color("  ⊘ 观察池剔除 %s：板块 %s %.2f%% 偏弱"
+                                    % (code, sname, spct or 0), "yellow"))
+                        continue
+                except Exception:
+                    pass
                 watch.append(item)
             except Exception:
                 continue
@@ -465,6 +477,7 @@ class AITrader:
             "大盘温度": temp_info,
             "行业板块强度(涨幅前列)": sector_rows,
             "风控收紧(代码已生效，不可违反)": gate_info,
+            "板块强度过滤规则": market.sector_rules(self.ai_cfg),
             "待执行计划单(昨日收盘时定下，今日开盘按规则执行)": self._load_plans(),
             "持仓": positions,
             "观察池": watch,
@@ -533,6 +546,20 @@ class AITrader:
                     continue
             q = quote_cache[code]
             gate_info = day.get("gate") or {}
+            if act == "BUY":
+                try:
+                    rules = market.sector_rules(self.ai_cfg)
+                    if rules["enabled"]:
+                        weak, sname, spct = market.is_weak(code, rules["weak_pct"])
+                        if weak:
+                            msg = ("拒绝买入 %s：所属板块「%s」当日 %.2f%%，"
+                                   "低于阈值 %.1f%%，弱势板块不做"
+                                   % (code, sname, spct or 0, rules["weak_pct"]))
+                            print(color("  ✘ " + msg, "green"))
+                            results.append(msg)
+                            continue
+                except Exception:
+                    pass
             if act == "BUY" and gate_info and gate_info.get("allow_new") is False:
                 msg = "拒绝买入 %s：%s" % (code, gate_info.get("note", "大盘弱势，禁止开新仓"))
                 print(color("  ✘ " + msg, "green"))

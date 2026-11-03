@@ -36,8 +36,8 @@ try:                                     # Windows 控制台中文
 except Exception:
     pass
 
-from astock import (analyze, backup, chart_svg, monitor, notify, signals,
-                    store)  # noqa: E402
+from astock import (analyze, backup, chart_svg, monitor, notify, report,
+                    signals, store)  # noqa: E402
 from astock.notify import color  # noqa: E402
 
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -105,46 +105,16 @@ def cmd_monitor(args, cfg):
 
 
 def cmd_daily(args, cfg):
-    codes = args.codes or (cfg.get("watchlist") or [])
-    sections, brief = [], []
-    for code in codes:
-        try:
-            r = signals.build_report(code, cfg)
-        except Exception as exc:                      # noqa: BLE001
-            sections.append("## %s\n\n数据获取失败：%s\n" % (code, exc))
-            continue
-        brief.append(r)
-        sections.append(analyze.render_markdown(r))
-    # 顺带画 K 线图（纯 SVG，无需任何第三方库）
-    svg_blocks = []
-    if not getattr(args, "no_svg", False):
-        for r in brief:
-            try:
-                p = chart_svg.save_svg(r["code"], r.get("name") or "",
-                                       path=os.path.join(BASE, "data", "reports",
-                                                         "%s_kline.svg" % r["code"]))
-                with open(p, encoding="utf-8") as f:
-                    svg = f.read()
-                svg_blocks.append('<div class="chart">%s</div>' % svg)
-                sections.append("\n![%s K线](%s_kline.svg)\n" % (r["code"], r["code"]))
-            except Exception as exc:                   # noqa: BLE001
-                print(color("  [%s] 画图失败：%s" % (r["code"], exc), "yellow"))
-    head = ("# 收盘报告 %s\n\n数据源：东方财富公开接口｜生成：%s\n\n"
-            % (datetime.now().strftime("%Y-%m-%d"), datetime.now().strftime("%H:%M:%S")))
-    path = store.write_report_md(head + "\n".join(sections))
-    if svg_blocks:
-        html = ("<!doctype html><meta charset='utf-8'><title>收盘报告 %s</title>"
-                "<style>body{background:#0b0f16;color:#dfe7f3;font-family:system-ui;margin:24px}"
-                ".chart{margin:18px 0;background:#0b0f16}</style>%s"
-                % (datetime.now().strftime("%Y-%m-%d"), "".join(svg_blocks)))
-        hp = path.replace(".md", ".html")
-        with open(hp, "w", encoding="utf-8") as f:
-            f.write(html)
-        print(color("  图表报告：%s" % hp, "grey"))
-    notify.banner("收盘报告已生成  %s" % datetime.now().strftime("%Y-%m-%d %H:%M"))
-    print(analyze.render_brief(brief))
-    print("")
-    print(color("报告文件：%s" % path, "bold"))
+    """生成当日报告：Markdown + HTML（内嵌 SVG K线），并归档到 archive/<日期>/。"""
+    notify.banner("收盘报告  %s" % datetime.now().strftime("%Y-%m-%d %H:%M"))
+    res = report.build(codes=args.codes or None, cfg=cfg,
+                       verbose=True, keep_days=getattr(args, "keep_days", None))
+    if res["codes"]:
+        print(color("已生成 %d 只标的的报告。" % len(res["codes"]), "bold"))
+    if res.get("temp"):
+        t = res["temp"]
+        print(color("大盘温度 %d（%s）" % (t["temp"], t["level"]), "grey"))
+    print(color("打开 HTML：%s" % res["html"], "grey"))
 
 
 def cmd_test(args, cfg):
@@ -507,9 +477,9 @@ def main():
     pm.add_argument("--once", action="store_true", help="只跑一轮")
     pm.set_defaults(func=cmd_monitor)
 
-    pd = sub.add_parser("daily", help="生成收盘报告（含 SVG K 线图）")
+    pd = sub.add_parser("daily", help="生成当日报告（HTML+MD+SVG 图，自动归档）")
     pd.add_argument("codes", nargs="*")
-    pd.add_argument("--no-svg", action="store_true", help="不生成 K 线图")
+    pd.add_argument("--keep-days", type=int, help="归档保留天数（默认 60）")
     pd.set_defaults(func=cmd_daily)
 
     pt = sub.add_parser("test", help="数据源自检")
