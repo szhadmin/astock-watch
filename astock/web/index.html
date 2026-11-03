@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>astock-watch · AI 操盘系统</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <span class="title">astock-watch</span>
+    <span class="sub">AI 自主操盘系统</span>
+  </div>
+  <div class="headline">
+    <div class="kpi"><label>总权益</label><b id="hd-equity">--</b></div>
+    <div class="kpi"><label>累计</label><b id="hd-return">--</b></div>
+    <div class="kpi"><label>现金</label><b id="hd-cash">--</b></div>
+    <div class="kpi"><label>持仓</label><b id="hd-pos">--</b></div>
+  </div>
+  <div class="statusline">
+    <span id="hd-session" class="pill">--</span>
+    <span id="hd-provider" class="pill ghost">--</span>
+    <span id="hd-clock" class="pill ghost">--</span>
+    <button id="btn-refresh" class="btn tiny">刷新</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <a href="#dashboard" data-tab="dashboard">仪表盘</a>
+  <a href="#kline" data-tab="kline">K线复盘</a>
+  <a href="#decisions" data-tab="decisions">AI 决策</a>
+  <a href="#pool" data-tab="pool">选股池</a>
+  <a href="#review" data-tab="review">复盘</a>
+  <a href="#style" data-tab="style">风格手册</a>
+  <a href="#settings" data-tab="settings">设置</a>
+</nav>
+
+<main id="view"><div class="loading">加载中…</div></main>
+
+<aside id="jobpanel" class="jobpanel hidden">
+  <div class="jobhead">
+    <b id="job-title">任务</b>
+    <span id="job-status" class="pill">running</span>
+    <span class="spacer"></span>
+    <button class="btn tiny" onclick="App.closeJob()">收起</button>
+  </div>
+  <div id="job-list" style="padding:7px 12px;border-bottom:1px solid #1e2839;line-height:1.9"></div>
+  <pre id="job-log"></pre>
+</aside>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

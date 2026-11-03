@@ -1,0 +1,102 @@
+{
+  "_说明": "把本文件复制为 config.json 再填自己的参数。config.json 已被 .gitignore 排除，不会提交到仓库。",
+  "account": {
+    "total_capital": 15000,
+    "risk_budget_pct": 2.0,
+    "max_position_pct": 45.0
+  },
+  "watchlist": [
+    "000620"
+  ],
+  "symbols": {
+    "000620": {
+      "name": "盈新发展",
+      "support": [
+        2.56,
+        2.53,
+        2.41
+      ],
+      "resistance": [
+        2.65,
+        2.74,
+        2.83
+      ],
+      "stop": 2.53,
+      "add_trigger": 2.74,
+      "targets": [
+        2.83,
+        3.02,
+        3.2
+      ],
+      "note": "2.53-2.60 是 2026年7月以来第4次测试的支撑带；收盘跌破 2.53 视为周期低点失效→止损；放量站上 2.74(MA10) 为右侧确认→可加仓至 1800 股"
+    }
+  },
+  "positions": {},
+  "monitor": {
+    "interval_sec": 15,
+    "refresh_sec": 120,
+    "status_sec": 60,
+    "exit_when_closed": false
+  },
+  "alerts": {
+    "cooldown_sec": 900,
+    "pct_5min": 1.5,
+    "pct_5min_window_sec": 300,
+    "pct_day": 5.0,
+    "vol_ratio": 2.5,
+    "amount_yi": 5.0
+  },
+  "notify": {
+    "console_beep": true,
+    "webhook": {
+      "enabled": false,
+      "type": "wecom",
+      "url": ""
+    }
+  },
+  "ai": {
+    "_说明": "provider: openai | custom | deepseek | ollama。真实模型必须填 base_url / model / api_key（本地 ollama 可空 key）。max_tokens_* 为各阶段输出额度，思考型模型需留足。",
+    "provider": "custom",
+    "api_key": "",
+    "model": "",
+    "base_url": "",
+    "temperature": 0.4,
+    "max_tokens": 3000,
+    "max_tokens_pick": 3000,
+    "max_tokens_decide": 5000,
+    "max_tokens_review": 4000,
+    "max_tokens_playbook": 5000,
+    "timeout_sec": 180,
+    "bars_in_prompt": 15,
+    "screen": {
+      "universe_size": 300,
+      "max_scan": 60,
+      "top": 20
+    },
+    "rails": {
+      "_说明": "以下为代码硬约束，AI 无法修改，只能在这些边界内决策",
+      "max_position_pct": 40.0,
+      "max_total_position_pct": 80.0,
+      "max_trades_per_day": 4.0,
+      "max_risk_per_trade_pct": 1.5,
+      "daily_loss_limit_pct": 3.0,
+      "min_price": 2.0,
+      "max_price": 40.0,
+      "price_band_pct": 2.5,
+      "forbid_buy_pct": 8.0,
+      "forbid_sell_pct": -8.0
+    },
+    "schedule": {
+      "_说明": "Web 服务与 --loop 的自动调度；只在交易时段动作",
+      "enabled": true,
+      "decide_every_min": 30,
+      "pick_at": "15:12",
+      "review_at": "15:05"
+    },
+    "execution": {
+      "_说明": "下单执行策略：非交易时段只生成计划单，次日开盘执行（避免用收盘价事后成交）",
+      "defer_outside_session": true,
+      "cancel_if_gap_pct": 1.5
+    }
+  }
+}

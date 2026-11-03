@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 语法检查（Python）
+        run: |
+          python -m compileall -q astock main.py selftest.py selftest_ai.py selftest_plans.py
+          echo "python syntax ok"
+
+      - name: 静态检查（前端 JS）
+        run: |
+          node --check astock/web/app.js
+          node --check selftest_kline.js
+          echo "js syntax ok"
+
+      - name: 单元级自检（无需网络/密钥）
+        run: |
+          python - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, ".")
+          # 指标与策略内核可在无网络下跑通
+          from astock import indicators as ind, strategy, backtest
+          closes = [10 + (i % 7) * 0.3 for i in range(120)]
+          bars = [{"date": "2026-01-%02d" % (i % 28 + 1), "open": c, "high": c * 1.01,
+                   "low": c * 0.99, "close": c, "vol": 1e5, "amount": 1e6,
+                   "pct": 0.0, "turnover": 1.0} for i, c in enumerate(closes)]
+          d = strategy.evaluate(bars, len(bars) - 1)
+          assert 0 <= d["score"] <= 100 and 0 <= d["target_pct"] <= 100
+          r = backtest.run(bars, capital=10000)
+          assert r["days"] > 0
+          assert ind.sma([1, 2, 3], 2)[-1] == 2.5
+          print("core logic ok")
+          PY
+
+      - name: 配置文件模板可用
+        run: |
+          cp config.example.json config.json
+          python -c "import json;c=json.load(open('config.json',encoding='utf-8'));print('config ok', c['ai']['provider'])"
