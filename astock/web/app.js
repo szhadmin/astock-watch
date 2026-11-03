@@ -860,6 +860,167 @@ const App = (() => {
     viewPool();
   }
 
+  /* ---------------- 页面：我的持仓（真实账户，手工录入 + 分析） ---------------- */
+  function holdState() {
+    if (!S.hold) S.hold = { capital: 15000, items: [], data: null, loaded: false };
+    return S.hold;
+  }
+
+  async function viewHoldings() {
+    const st = holdState();
+    let d;
+    try { d = await api('/api/holdings'); }
+    catch (e) { $('view').innerHTML = `<div class="card"><h3>读取失败</h3><pre>${esc(e.message)}</pre></div>`; return; }
+    st.data = d;
+    st.capital = d.capital || 15000;
+    st.items = (d.raw || []).map(x => ({ ...x }));
+    st.loaded = true;
+    $('view').innerHTML = `
+      <div class="card">
+        <div class="row"><h3 style="margin:0">我的持仓</h3>
+          <span class="spacer"></span>
+          <span class="dim" style="font-size:12px">这是你自己的真实账户，AI 不会动它；AI 模拟盘在仪表盘</span>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <label style="font-size:12px">资金量（本金）
+            <input id="hold-capital" type="number" step="100" value="${st.capital}" style="width:130px;margin-left:6px">
+          </label>
+          <button class="btn tiny" onclick="App.addHoldRow()">+ 加一只</button>
+          <button class="btn primary" onclick="App.saveHoldings()">保存并分析</button>
+          <span class="spacer"></span>
+          <span class="dim" style="font-size:12px">${d.updated ? '上次保存 ' + esc(d.updated) : '尚未保存过'}</span>
+        </div>
+        <div id="hold-edit" style="margin-top:12px"></div>
+      </div>
+      <div id="hold-analysis" style="margin-top:14px"></div>`;
+    renderHoldEditor();
+    renderHoldAnalysis(d);
+  }
+
+  function renderHoldEditor() {
+    const st = holdState();
+    const box = $('hold-edit');
+    if (!box) return;
+    if (!st.items.length) {
+      box.innerHTML = '<div class="dim">还没有录入。点「+ 加一只」填代码、股数、成本，然后点「保存并分析」。</div>';
+      return;
+    }
+    box.innerHTML = `<table><thead><tr>
+        <th style="width:110px">代码</th><th style="width:100px">股数</th><th style="width:100px">成本价</th>
+        <th style="width:130px">买入日期</th><th>备注</th><th style="width:60px"></th></tr></thead><tbody>
+      ${st.items.map((it, i) => `<tr>
+        <td><input class="h-code" data-i="${i}" value="${esc(it.code || '')}" placeholder="6位" style="width:96px"></td>
+        <td><input class="h-shares" data-i="${i}" type="number" step="100" value="${it.shares || ''}" style="width:88px"></td>
+        <td><input class="h-cost" data-i="${i}" type="number" step="0.001" value="${it.cost || ''}" style="width:88px"></td>
+        <td><input class="h-date" data-i="${i}" type="date" value="${esc(it.date || '')}" style="width:120px"></td>
+        <td><input class="h-note" data-i="${i}" value="${esc(it.note || '')}" placeholder="比如：突破买入/补仓" style="width:100%"></td>
+        <td><button class="btn tiny" onclick="App.delHoldRow(${i})">删</button></td></tr>`).join('')}
+      </tbody></table>`;
+  }
+
+  function collectHoldRows() {
+    const st = holdState();
+    const items = [];
+    $('view').querySelectorAll('.h-code').forEach(inp => {
+      const i = inp.dataset.i;
+      const q = s => { const el = $('view').querySelector('.' + s + '[data-i="' + i + '"]'); return el ? el.value.trim() : ''; };
+      items.push({ code: inp.value.trim(), shares: q('h-shares'), cost: q('h-cost'),
+                   date: q('h-date'), note: q('h-note') });
+    });
+    return items;
+  }
+
+  function addHoldRow() {
+    const st = holdState();
+    st.items = collectHoldRows();
+    st.items.push({ code: '', shares: '', cost: '', date: '', note: '' });
+    renderHoldEditor();
+  }
+
+  function delHoldRow(i) {
+    const st = holdState();
+    st.items = collectHoldRows();
+    st.items.splice(i, 1);
+    renderHoldEditor();
+  }
+
+  async function saveHoldings() {
+    const st = holdState();
+    const capital = parseFloat(($('hold-capital') || {}).value || st.capital || 0);
+    const items = collectHoldRows().filter(x => x.code && x.shares && x.cost);
+    if (!items.length) { toast('至少填一只股票（代码/股数/成本）', true); return; }
+    try {
+      toast('保存中…');
+      const r = await post('/api/holdings', { capital, items });
+      st.data = r; st.capital = r.capital; st.items = (r.raw || []).map(x => ({ ...x }));
+      renderHoldEditor();
+      renderHoldAnalysis(r);
+      toast('已保存并完成分析');
+    } catch (e) { toast('保存失败：' + e.message, true); }
+  }
+
+  function renderHoldAnalysis(d) {
+    const box = $('hold-analysis');
+    if (!box) return;
+    if (!d || !d.items || !d.items.length) {
+      box.innerHTML = '<div class="card"><div class="dim">录入持仓后这里会显示：总市值、总盈亏、仓位占比，以及每只票的评分、止损、目标和建议。</div></div>';
+      return;
+    }
+    const s = d.summary || {};
+    const kpi = `<div class="grid g4">
+      <div class="card"><h3>总市值</h3><div class="big ${cls(s.pnl)}">${money(s.total_mv)}</div>
+        <div class="${cls(s.pnl)}">${s.pnl >= 0 ? '+' : ''}${money(s.pnl)} （${pct(s.pnl_pct)}）</div></div>
+      <div class="card"><h3>持仓成本</h3><div class="big">${money(s.total_cost)}</div>
+        <div class="dim">${s.count} 只 · 仓位 ${n2(s.position_pct, 1)}%</div></div>
+      <div class="card"><h3>可用资金</h3><div class="big">${money(s.cash)}</div>
+        <div class="dim">本金 ${money(s.capital)}</div></div>
+      <div class="card"><h3>风险提示</h3>
+        <div class="dim" style="font-size:12px">${holdRiskText(d)}</div></div>
+    </div>`;
+    const rows = d.items.map(r => {
+      if (!r.ok) {
+        return `<div class="card" style="margin-top:12px"><b>${esc(r.code)}</b>
+          <span class="warn">${esc(r.error || '获取失败')}</span></div>`;
+      }
+      return `<div class="card" style="margin-top:12px">
+        <div class="row">
+          <b style="cursor:pointer" onclick="App.openKline('${r.code}')">${esc(r.name)} <span class="dim mono">${r.code}</span></b>
+          <span class="mono ${cls(r.pnl_pct)}" style="font-size:17px">${n2(r.price)}</span>
+          <span class="${cls(r.pct)}">${pct(r.pct)}</span>
+          <span class="tag ${r.tone === 'danger' ? 'warn' : (r.tone === 'ok' ? 'ok' : '')}">${esc(r.level)}</span>
+          <span class="spacer"></span>
+          <span class="${cls(r.pnl_pct)}">${r.pnl >= 0 ? '+' : ''}${money(r.pnl)}（${pct(r.pnl_pct)}）</span>
+        </div>
+        <div class="grid g3" style="margin-top:8px">
+          <div><div class="dim" style="font-size:12px">持仓</div>
+            <div>${r.shares}股 · 成本 ${n2(r.cost, 3)} · 市值 ${money(r.mv)}</div>
+            <div class="dim" style="font-size:12px">占持仓 ${n2(r.weight_pct, 1)}%</div></div>
+          <div><div class="dim" style="font-size:12px">技术面</div>
+            <div>评分 <b>${r.score}</b>／右侧 ${r.right} · 左侧 ${r.left} · 确认 ${r.checklist}/4</div>
+            <div class="dim" style="font-size:12px">止损 ${n2(r.stop)} · 目标 ${(r.targets || []).map(x => n2(x)).join(' → ') || '--'}</div></div>
+          <div><div class="dim" style="font-size:12px">建议</div>
+            <div class="${r.tone === 'danger' ? 'down' : (r.tone === 'warn' ? 'warn' : 'up')}">${esc(r.advice)}</div>
+            <div class="dim" style="font-size:12px">距止损 ${r.dist_stop_pct === null ? '--' : n2(r.dist_stop_pct) + '%'}</div></div>
+        </div>
+        ${r.note ? `<div class="dim" style="margin-top:6px;font-size:12px">备注：${esc(r.note)}</div>` : ''}
+      </div>`;
+    }).join('');
+    box.innerHTML = kpi + rows;
+  }
+
+  function holdRiskText(d) {
+    const s = d.summary || {};
+    const tips = [];
+    if (s.position_pct >= 90) tips.push('仓位已接近满仓，注意单票与总仓风险');
+    else if (s.position_pct < 30) tips.push('仓位较轻，等右侧确认再加');
+    const bad = (d.items || []).filter(r => r.ok && (r.tone === 'danger'));
+    if (bad.length) tips.push(bad.length + ' 只已跌破止损：' + bad.map(x => x.name).join('、'));
+    const weak = (d.items || []).filter(r => r.ok && r.score < 40);
+    if (weak.length) tips.push(weak.length + ' 只处于弱势筑底区，别加仓');
+    if (s.pnl_pct <= -8) tips.push('组合浮亏已超 8%，建议先减仓再谈机会');
+    return tips.length ? tips.join('；') : '结构正常：无破止损、无满仓，按各自区间操作。';
+  }
+
   /* ---------------- 页面：龙虎榜（全市场） ---------------- */
   async function viewLhb() {
     const st = S.lhb || (S.lhb = { days: 30, code: '' });
@@ -1021,7 +1182,7 @@ const App = (() => {
         </div>
       </div>
       <div class="card hidden" id="doc-view" style="margin-top:14px"><h3 id="doc-title"></h3><pre id="doc-body"></pre></div>`;
-    loadArchive, loadLhb, loadStockAlt();
+    loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow();
   }
 
   async function loadArchive() {
@@ -1365,8 +1526,8 @@ const App = (() => {
   /* ---------------- 路由 ---------------- */
   const VIEWS = {
     dashboard: viewDashboard, kline: viewKline, decisions: viewDecisions,
-    pool: viewPool, lhb: viewLhb, review: viewReview, style: viewStyle,
-    settings: viewSettings
+    pool: viewPool, holdings: viewHoldings, lhb: viewLhb, review: viewReview,
+    style: viewStyle, settings: viewSettings
   };
   async function route(tab, force) {
     tab = tab || (location.hash || '#dashboard').slice(1);
@@ -1402,6 +1563,6 @@ const App = (() => {
     showDecision, showPrompt, showReport, showJournal, showPb, showFailed,
     addWatch, saveWatch, openKline, selectJob, setKlinePeriod, setKlineDays,
     toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore,
-    loadArchive, loadLhb, loadStockAlt
+    loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow
   };
 })();

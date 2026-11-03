@@ -26,8 +26,8 @@ from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import (ai_agent, altdata, backup, feed, market, memory, monitor, paper,
-               report, screener)
+from . import (ai_agent, altdata, backup, feed, holdings, market, memory, monitor,
+               paper, report, screener)
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -723,6 +723,31 @@ def api_report_archive(_q):
     return {"items": report.archive_list(30)}
 
 
+def api_holdings(_q):
+    """我的持仓：资金量 + 手工录入的股票与成本 + 逐只分析。"""
+    try:
+        return holdings.analyze(load_config())
+    except Exception as exc:                          # noqa: BLE001
+        return {"error": "分析失败：%s" % exc, "items": [], "summary": {}}
+
+
+def api_holdings_save(body):
+    """保存资金量与持仓（保存后自动备份，避免丢数据）。"""
+    try:
+        saved = holdings.save({"capital": body.get("capital"),
+                               "items": body.get("items") or []})
+    except Exception as exc:                          # noqa: BLE001
+        return None, "保存失败：%s" % exc
+    try:
+        backup.make_backup("holdings")
+    except Exception:
+        pass
+    res = holdings.analyze(load_config())
+    res["saved"] = {"capital": saved["capital"], "count": len(saved["items"]),
+                    "updated": saved["updated"]}
+    return res, None
+
+
 def api_altdata(q):
     """单只股票的扩展数据：财报 / 股东户数 / 龙虎榜。"""
     code = (q.get("code") or [""])[0].strip()
@@ -956,6 +981,7 @@ GET_ROUTES = {
     "/api/market": api_market,
     "/api/altstatus": api_altstatus,
     "/api/altdata": api_altdata,
+    "/api/holdings": api_holdings,
     "/api/lhb": api_lhb,
     "/api/report_archive": api_report_archive,
     "/api/job": api_job,
@@ -968,6 +994,7 @@ POST_ROUTES = {
     "/api/run": api_run,
     "/api/reset": api_reset,
     "/api/backup": api_backup,
+    "/api/holdings": api_holdings_save,
     "/api/restore": api_restore,
 }
 

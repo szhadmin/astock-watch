@@ -27,6 +27,7 @@ CRITICAL = [
     "ai/lessons.json",          # 教训库
     "ai/watchlist.json",        # 观察池
     "ai/plans/pending_plans.json",  # 待执行计划单
+    "holdings.json",            # 我的真实持仓（资金量/成本）
 ]
 
 
