@@ -87,6 +87,127 @@ const App = (() => {
     </svg>`;
   }
 
+  /* ---------------- 我的持仓：实盘成交记录 + 真实绩效 ---------------- */
+  function tradeState() {
+    if (!S.trades) S.trades = { items: [], stats: null, derived: [], loaded: false };
+    return S.trades;
+  }
+
+  async function loadRealTrades() {
+    const box = $('trades-box');
+    if (!box) return;
+    try {
+      const d = await api('/api/real_trades');
+      const st = tradeState();
+      st.items = d.items || [];
+      st.stats = d.stats || null;
+      st.derived = d.derived || [];
+      box.innerHTML = tradeStatsHtml(d) + tradeListHtml(d);
+    } catch (e) {
+      box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  function tradeStatsHtml(d) {
+    const s = d.stats || {};
+    const tone = v => v > 0 ? 'up' : (v < 0 ? 'down' : 'dim');
+    return `<div class="grid g4">
+      <div class="card"><h3>已实现盈亏</h3>
+        <div class="big ${tone(s.realized)}">${s.realized >= 0 ? '+' : ''}${money(s.realized)}</div>
+        <div class="dim">${s.closed || 0} 笔平仓 · 手续费 ${money(s.fee_total)}</div></div>
+      <div class="card"><h3>胜率</h3>
+        <div class="big">${n2(s.win_rate_pct, 1)}%</div>
+        <div class="dim">${s.wins || 0} 胜 / ${s.losses || 0} 负</div></div>
+      <div class="card"><h3>盈亏比</h3>
+        <div class="big">${s.profit_factor || '--'}</div>
+        <div class="dim">平均盈 ${money(s.avg_win)} / 平均亏 ${money(s.avg_loss)}</div></div>
+      <div class="card"><h3>交易次数</h3>
+        <div class="big">${(d.items || []).length}</div>
+        <div class="dim">买 ${s.buys || 0} · 卖 ${s.sells || 0}</div></div>
+    </div>`;
+  }
+
+  function tradeListHtml(d) {
+    const items = d.items || [];
+    const derived = d.derived || [];
+    const form = `
+      <div class="row" style="margin-bottom:8px;gap:6px">
+        <input id="t-date" type="date" style="width:130px">
+        <input id="t-code" placeholder="代码" style="width:90px">
+        <select id="t-side" style="width:90px"><option value="BUY">买入</option><option value="SELL">卖出</option></select>
+        <input id="t-shares" type="number" step="100" placeholder="股数" style="width:96px">
+        <input id="t-price" type="number" step="0.001" placeholder="价格" style="width:96px">
+        <input id="t-fee" type="number" step="0.01" placeholder="费用" style="width:84px">
+        <input id="t-note" placeholder="备注" style="width:150px">
+        <button class="btn primary tiny" onclick="App.addRealTrade()">+ 记一笔</button>
+      </div>`;
+    const rows = items.slice().reverse().map(t => `<tr>
+        <td class="l mono" style="font-size:12px">${esc(t.date || '')}</td>
+        <td class="l">${esc(t.name || '')} <span class="dim mono">${esc(t.code)}</span></td>
+        <td class="${t.side === 'BUY' ? 'up' : 'down'}">${t.side === 'BUY' ? '买入' : '卖出'}</td>
+        <td>${t.shares}</td><td>${n2(t.price, 3)}</td>
+        <td class="dim">${n2(t.fee || 0, 2)}</td>
+        <td class="${cls(t.realized)}">${t.realized === null || t.realized === undefined ? '--' : money(t.realized)}</td>
+        <td class="l dim" style="font-size:12px">${esc(t.note || '')}</td>
+        <td><button class="btn tiny" onclick="App.delRealTrade('${esc(t.id)}')">删</button></td></tr>`).join('');
+    const dRows = derived.map(r => `<tr>
+        <td class="l">${esc(r.name || '')} <span class="dim mono">${r.code}</span></td>
+        <td>${r.shares}</td><td>${n2(r.cost, 3)}</td>
+        <td class="dim">${r.buys}</td><td class="dim">${r.sells}</td></tr>`).join('');
+    return `<div class="grid g2" style="margin-top:14px">
+      <div class="card"><h3>录入成交</h3>${form}
+        <h3 style="margin-top:12px">成交流水（${items.length} 笔）</h3>
+        ${items.length ? `<div style="max-height:300px;overflow:auto"><table>
+          <thead><tr><th>日期</th><th>标的</th><th>方向</th><th>股数</th><th>价格</th><th>费用</th><th>已实现盈亏</th><th>备注</th><th></th></tr></thead>
+          <tbody>${rows}</tbody></table></div>`
+        : '<div class="dim">还没有成交记录。卖出的盈亏会自动按「加权平均成本」结算。</div>'}
+      </div>
+      <div class="card"><h3>由流水推导的持仓</h3>
+        ${derived.length ? `<table><thead><tr><th>标的</th><th>股数</th><th>摊薄成本</th><th>买次</th><th>卖次</th></tr></thead><tbody>${dRows}</tbody></table>
+          <div class="row" style="margin-top:10px">
+            <button class="btn" onclick="App.syncTradesToHoldings()">用流水覆盖持仓表</button>
+            <span class="dim" style="font-size:12px">让「我的持仓」与流水保持一致</span></div>`
+        : '<div class="dim">录入买入后这里会自动算出持股数与摊薄成本。</div>'}
+        <div class="dim" style="margin-top:10px;font-size:12px">
+          口径：成本用**加权平均法**；每次卖出结算一次已实现盈亏；胜率＝盈利平仓次数÷总平仓次数；盈亏比＝总盈利÷总亏损。
+        </div>
+      </div>
+    </div>`;
+  }
+
+  async function addRealTrade() {
+    const body = {
+      date: ($('t-date') || {}).value || new Date().toISOString().slice(0, 10),
+      code: (($('t-code') || {}).value || '').trim(),
+      side: ($('t-side') || {}).value || 'BUY',
+      shares: parseInt(($('t-shares') || {}).value || 0, 10),
+      price: parseFloat(($('t-price') || {}).value || 0),
+      fee: parseFloat(($('t-fee') || {}).value || 0),
+      note: (($('t-note') || {}).value || '').trim(),
+    };
+    if (!body.code || !body.shares || !body.price) { toast('代码/股数/价格必填', true); return; }
+    try {
+      await post('/api/real_trades', body);
+      toast('已记录');
+      loadRealTrades();
+    } catch (e) { toast('记录失败：' + e.message, true); }
+  }
+
+  async function delRealTrade(id) {
+    if (!confirm('删除这条成交记录？')) return;
+    try { await post('/api/real_trades/delete', { id }); toast('已删除'); loadRealTrades(); }
+    catch (e) { toast('删除失败：' + e.message, true); }
+  }
+
+  async function syncTradesToHoldings() {
+    if (!confirm('用成交流水推导出的持仓覆盖「我的持仓」表？（资金量不变）')) return;
+    try {
+      const r = await post('/api/real_trades/rebuild', {});
+      toast('已同步 ' + (r.count || 0) + ' 只持仓');
+      route('holdings', true);
+    } catch (e) { toast('同步失败：' + e.message, true); }
+  }
+
   /* ---------------- 仪表盘：我的持仓 + AI 建议卡 ---------------- */
   function myHoldCardHtml(h, adv) {
     if (!h || h.error) return '<div class="dim">我的持仓读取中…</div>';
@@ -1019,10 +1140,14 @@ const App = (() => {
         <div id="hold-advice" class="dim">加载中…</div>
         <div class="row" style="margin-top:8px"><button class="btn tiny" onclick="App.run('decide')">让 AI 重新决策</button></div>
       </div>
+      <div class="card" style="margin-top:14px"><h3>实盘成交与绩效 <span class="dim" style="font-weight:400">（自己记流水，自动算胜率与盈亏比）</span></h3>
+        <div id="trades-box" class="dim">加载中…</div>
+      </div>
       <div id="hold-analysis" style="margin-top:14px"></div>`;
     renderHoldEditor();
     renderHoldAnalysis(d);
     renderHoldAdvice();
+    loadRealTrades();
   }
 
   function renderHoldEditor() {
@@ -1332,7 +1457,8 @@ const App = (() => {
       </div>
       <div class="card hidden" id="doc-view" style="margin-top:14px"><h3 id="doc-title"></h3><pre id="doc-body"></pre></div>`;
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
-    go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard();
+    go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
+    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings();
   }
 
   async function loadArchive() {
@@ -1721,6 +1847,7 @@ const App = (() => {
     addWatch, saveWatch, openKline, selectJob, setKlinePeriod, setKlineDays,
     toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore,
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
-    go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard
+    go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
+    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings
   };
 })();

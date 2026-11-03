@@ -26,6 +26,8 @@ import ssl
 import threading
 from datetime import datetime
 from email.header import Header
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
@@ -97,8 +99,41 @@ def _log(entry):
         pass
 
 
-def _send_sync(subject, html, text, c):
-    msg = MIMEText(html, "html", "utf-8")
+def _build_msg(subject, html, c, attachments=None):
+    """构造邮件：无附件用简单 HTML；有附件用 multipart（正文 + 附件）。"""
+    if not attachments:
+        msg = MIMEText(html, "html", "utf-8")
+    else:
+        msg = MIMEMultipart()
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(html, "html", "utf-8"))
+        msg.attach(alt)
+        for path in attachments:
+            try:
+                if not path or not os.path.isfile(path):
+                    continue
+                with open(path, "rb") as f:
+                    raw = f.read()
+                name = os.path.basename(path)
+                if name.lower().endswith((".html", ".htm")):
+                    part = MIMEApplication(raw, _subtype="html")
+                elif name.lower().endswith(".md"):
+                    part = MIMEApplication(raw, _subtype="octet-stream")
+                else:
+                    part = MIMEApplication(raw)
+                part.add_header("Content-Disposition", "attachment", filename=name)
+                msg.attach(part)
+            except Exception:
+                continue
+    msg["Subject"] = Header(subject, "utf-8")
+    msg["From"] = formataddr((str(Header(c.get("from_name") or "astock-watch", "utf-8")),
+                              c["user"]))
+    msg["To"] = c["to"]
+    return msg
+
+
+def _send_sync(subject, html, text, c, attachments=None):
+    msg = _build_msg(subject, html, c, attachments)
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = formataddr((str(Header(c.get("from_name") or "astock-watch", "utf-8")),
                               c["user"]))
@@ -124,7 +159,7 @@ def _send_sync(subject, html, text, c):
             pass
 
 
-def send(subject, html, text=None, cfg=None, block=False):
+def send(subject, html, text=None, cfg=None, block=False, attachments=None):
     """发一封 HTML 邮件。失败只记日志，不抛异常。"""
     ok, why = available(cfg)
     if not ok:
@@ -134,8 +169,9 @@ def send(subject, html, text=None, cfg=None, block=False):
 
     def _run():
         try:
-            _send_sync(subject, html, text, c)
-            _log({"event": "sent", "subject": subject, "to": c["to"]})
+            _send_sync(subject, html, text, c, attachments)
+            _log({"event": "sent", "subject": subject, "to": c["to"],
+                  "attachments": [os.path.basename(a) for a in (attachments or [])]})
             print("  ✉ 邮件已发送：%s → %s" % (subject, c["to"]))
         except Exception as exc:                       # noqa: BLE001
             _log({"event": "fail", "subject": subject, "error": str(exc)[:300]})
@@ -190,7 +226,8 @@ def send_trade(side, code, name, shares, price, amount, reason, account=None, cf
                 cfg=cfg)
 
 
-def send_digest(kind, journal="", plans=None, advices=None, account=None, temp=None, cfg=None):
+def send_digest(kind, journal="", plans=None, advices=None, account=None, temp=None,
+                cfg=None, attachments=None, extra_html=""):
     """每日复盘 / 次日计划 / 持仓建议 汇总邮件。"""
     ev = conf(cfg)["events"]
     key = "plan" if kind in ("plan", "daily") else "review"
@@ -236,9 +273,11 @@ def send_digest(kind, journal="", plans=None, advices=None, account=None, temp=N
                         len(account.get("positions") or [])))
     if journal:
         parts.append("<h3>操盘日记</h3><pre>%s</pre>" % str(journal)[:6000])
+    if extra_html:
+        parts.append(extra_html)
     subject = "[astock] %s %s" % (title, datetime.now().strftime("%m-%d"))
     return send(subject, _wrap(title, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                               "".join(parts)), cfg=cfg)
+                               "".join(parts)), cfg=cfg, attachments=attachments)
 
 
 def test(cfg=None, block=True):

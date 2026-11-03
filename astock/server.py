@@ -270,10 +270,13 @@ def run_phase(params):
     elif kind == "daily":
         res = report.build(cfg=cfg, verbose=True)
         try:
-            mailer.send_digest("daily", journal=_latest_journal(),
-                               plans=trader._load_plans(),
-                               advices=_holdings_advice(),
-                               account=trader._snapshot(), cfg=cfg)
+            tr = holdings.trades_overview()["stats"]
+            mailer.send_digest(
+                "daily", journal=_latest_journal(),
+                plans=trader._load_plans(), advices=_holdings_advice(),
+                account=trader._snapshot(), cfg=cfg,
+                attachments=[res.get("html"), res.get("md")],
+                extra_html=_real_stats_html(tr))
         except Exception:
             pass
         restore_cfg = None
@@ -759,6 +762,20 @@ def _latest_journal(limit=1500):
         return ""
 
 
+def _real_stats_html(st):
+    """实盘绩效小卡片（邮件正文用）。"""
+    if not st or not st.get("trades"):
+        return ""
+    return ("<h3>我的实盘绩效</h3><table>"
+            "<tr><th>已实现盈亏</th><td>%+.2f</td><th>胜率</th><td>%.1f%%</td></tr>"
+            "<tr><th>盈亏比</th><td>%s</td><th>平仓笔数</th><td>%d</td></tr>"
+            "<tr><th>总手续费</th><td>%.2f</td><th>买/卖</th><td>%d / %d</td></tr>"
+            "</table>" % (st.get("realized") or 0, st.get("win_rate_pct") or 0,
+                          st.get("profit_factor") or "--", st.get("closed") or 0,
+                          st.get("fee_total") or 0, st.get("buys") or 0,
+                          st.get("sells") or 0))
+
+
 def _holdings_advice():
     """AI 上一次给真实持仓的操作建议。"""
     p = os.path.join(BASE, "data", "holdings_advice.json")
@@ -767,6 +784,41 @@ def _holdings_advice():
             return json.load(f).get("items") or []
     except Exception:
         return []
+
+
+def api_real_trades(_q):
+    """实盘成交流水 + 由流水推导的持仓 + 真实绩效（胜率/盈亏比）。"""
+    return holdings.trades_overview()
+
+
+def api_real_trades_add(body):
+    try:
+        rec = holdings.add_trade(body)
+    except Exception as exc:                          # noqa: BLE001
+        return None, str(exc)
+    try:
+        backup.make_backup("real-trade")
+    except Exception:
+        pass
+    res = holdings.trades_overview()
+    res["added"] = rec
+    return res, None
+
+
+def api_real_trades_del(body):
+    n = holdings.del_trade((body.get("id") or "").strip())
+    res = holdings.trades_overview()
+    res["left"] = n
+    return res, None
+
+
+def api_real_trades_rebuild(body):
+    try:
+        n = holdings.rebuild_holdings_from_trades(
+            force=bool((body or {}).get("force")))
+    except Exception as exc:                          # noqa: BLE001
+        return None, "同步失败：%s" % exc
+    return {"ok": True, "count": n}, None
 
 
 def api_holdings_advice(_q):
@@ -1073,6 +1125,7 @@ GET_ROUTES = {
     "/api/altdata": api_altdata,
     "/api/holdings": api_holdings,
     "/api/holdings_advice": api_holdings_advice,
+    "/api/real_trades": api_real_trades,
     "/api/mail": api_mail_get,
     "/api/lhb": api_lhb,
     "/api/report_archive": api_report_archive,
@@ -1087,6 +1140,9 @@ POST_ROUTES = {
     "/api/reset": api_reset,
     "/api/backup": api_backup,
     "/api/holdings": api_holdings_save,
+    "/api/real_trades": api_real_trades_add,
+    "/api/real_trades/delete": api_real_trades_del,
+    "/api/real_trades/rebuild": api_real_trades_rebuild,
     "/api/mail": api_mail_save,
     "/api/mail/test": api_mail_test,
     "/api/restore": api_restore,
