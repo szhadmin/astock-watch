@@ -1295,6 +1295,102 @@ const App = (() => {
     return tips.length ? tips.join('；') : '结构正常：无破止损、无满仓，按各自区间操作。';
   }
 
+  /* ---------------- 页面：研究台（把命令变成按钮） ---------------- */
+  function labState() {
+    if (!S.lab) S.lab = { data: null, busy: false };
+    return S.lab;
+  }
+
+  async function viewLab() {
+    const v = $('view');
+    v.innerHTML = `
+      <div class="card">
+        <div class="row"><h3 style="margin:0">研究台</h3>
+          <span class="spacer"></span>
+          <span class="dim" style="font-size:12px">不用敲命令，点按钮就行</span>
+        </div>
+        <div class="dim" style="font-size:12px;margin-top:6px">
+          这里做三件事：① 用历史数据回放 AI 的决策（造出几万条"如果当时这么做会怎样"的样本）；
+          ② 从样本里自动找规律（含样本外验证，防止自欺）；③ 把结果按特征分层展示，告诉你哪条信号真有优势。
+        </div>
+        <div class="row" style="margin-top:12px;gap:8px;flex-wrap:wrap">
+          <label style="font-size:12px">回放股票数
+            <input id="lab-max" type="number" value="120" step="20" style="width:80px;margin-left:4px"></label>
+          <label style="font-size:12px">每只回放天数
+            <input id="lab-days" type="number" value="800" step="100" style="width:90px;margin-left:4px"></label>
+          <button class="btn primary" onclick="App.startResearch()">① 跑历史回放 + 自动发现规律</button>
+          <button class="btn" onclick="App.run('discover')">② 只重新发现规律</button>
+          <button class="btn" onclick="App.loadLab()">③ 刷新分层结果</button>
+        </div>
+        <div class="dim" style="font-size:12px;margin-top:8px" id="lab-hint">
+          回放会跑几分钟（数据源有限频，程序已自动节流），跑完会自动接着发现规律；期间可以正常用其他页面。
+        </div>
+      </div>
+      <div id="lab-body" style="margin-top:14px"><div class="card dim">点「刷新分层结果」加载数据</div></div>
+      <div class="card" style="margin-top:14px">
+        <h3>这些按钮对应什么</h3>
+        <table><thead><tr><th>你想做的事</th><th>点这里</th><th>（程序员等价命令）</th></tr></thead><tbody>
+          <tr><td class="l">造样本：用历史数据回放决策</td><td class="l">研究台 → ① 跑历史回放</td><td class="l dim mono" style="font-size:11px">python main.py replay --max 120 --days 800</td></tr>
+          <tr><td class="l">从样本里找规律</td><td class="l">研究台 → ② 只重新发现规律</td><td class="l dim mono" style="font-size:11px">python main.py discover</td></tr>
+          <tr><td class="l">看特征有没有用</td><td class="l">研究台 → ③ 刷新分层</td><td class="l dim mono" style="font-size:11px">python main.py lab</td></tr>
+          <tr><td class="l">看 AI 学到哪些规则</td><td class="l">顶部「经验规则」</td><td class="l dim mono" style="font-size:11px">python main.py rules</td></tr>
+          <tr><td class="l">看手册版本好坏 / 错题本</td><td class="l">顶部「经验规则」下半部分</td><td class="l dim mono" style="font-size:11px">python main.py evolution</td></tr>
+          <tr><td class="l">备份 / 恢复数据</td><td class="l">设置 → 数据备份</td><td class="l dim mono" style="font-size:11px">python main.py backup</td></tr>
+          <tr><td class="l">看 AI 今天做了什么</td><td class="l">仪表盘 / AI 决策</td><td class="l dim mono" style="font-size:11px">python main.py ai --status</td></tr>
+        </tbody></table>
+      </div>`;
+    loadLab();
+  }
+
+  async function startResearch() {
+    const max = parseInt(($('lab-max') || {}).value || 120, 10);
+    const days = parseInt(($('lab-days') || {}).value || 800, 10);
+    toast('已开始回放，约几分钟，跑完自动发现规律');
+    try {
+      await post('/api/run', { kind: 'replay', codes: max, days: days });
+      const hint = $('lab-hint');
+      if (hint) hint.innerHTML = '回放任务已启动，进度见右上角任务面板。跑完后点「刷新分层结果」。';
+    } catch (e) { toast('启动失败：' + e.message, true); }
+  }
+
+  async function loadLab() {
+    const box = $('lab-body');
+    if (!box) return;
+    box.innerHTML = '<div class="card dim">计算中…（样本多时需要几秒）</div>';
+    try {
+      const d = await api('/api/lab');
+      if (d.error) { box.innerHTML = '<div class="card dim">' + esc(d.error) + '</div>'; return; }
+      const pctTone = v => (v || 0) > 0.2 ? 'up' : ((v || 0) < 0 ? 'down' : 'dim');
+      const tbl = (rows, cols) => `<table><thead><tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>
+        ${rows.map(r => `<tr>${cols.map(c => `<td class="${(c.includes('超额') ? pctTone(r[c]) : '')}">${r[c] === undefined || r[c] === null ? '--' : r[c]}${c.includes('%') && r[c] !== undefined && r[c] !== null ? '%' : ''}</td>`).join('')}</tr>`).join('')}
+        </tbody></table>`;
+      const feat = d.features || {};
+      box.innerHTML = `
+        <div class="card">
+          <div class="row"><b>样本规模</b>
+            <span class="tag">${d.samples} 条</span>
+            <span class="tag">${d.stocks} 只股票</span>
+            <span class="tag">${esc((d.range || [])[0])} ~ ${esc((d.range || [])[1])}</span>
+            <span class="tag ${pctTone(d.baseline.net)}">基准：扣费后 ${n2(d.baseline.net)}%</span>
+            <span class="tag">命中 ${n2(d.baseline.hit, 1)}%</span></div>
+          <div class="dim" style="font-size:12px;margin-top:6px">
+            「超额」= 个股收益 − 上证指数同期收益（扣 beta）。只有当某一档的超额明显、且随档位单调变化，才说明这个特征真的有排序能力。</div>
+        </div>
+        <div class="grid g2" style="margin-top:14px">
+          <div class="card"><h3>评分分层</h3>${tbl(d.score, ['档', 'n', '超额%', '扣费超额%', '命中率%'])}</div>
+          <div class="card"><h3>大盘温度分层</h3>${tbl(d.temp, ['档', 'n', '超额%', '扣费超额%', '命中率%'])}</div>
+        </div>
+        <div class="grid g2" style="margin-top:14px">
+          <div class="card"><h3>持有期敏感性</h3>${tbl(d.horizon, ['期限', 'n', '原始%', '超额%', '扣费后超额%'])}</div>
+          <div class="card"><h3>市场状态</h3>${tbl(d.states, ['状态', 'n', '超额%', '扣费后超额%', '命中率%'])}</div>
+        </div>
+        <div class="card" style="margin-top:14px"><h3>新特征分层</h3>
+          ${Object.entries(feat).map(([k, rows]) =>
+            `<h3 style="font-size:13px;margin-top:10px">${esc(k)}</h3>${tbl(rows, ['档', 'n', '超额%', '扣费超额%', '命中率%'])}`).join('') || '<div class="dim">暂无</div>'}
+        </div>`;
+    } catch (e) { box.innerHTML = '<div class="card dim">读取失败：' + esc(e.message) + '</div>'; }
+  }
+
   /* ---------------- 页面：经验规则库（AI 的交易经验） ---------------- */
   async function viewRules() {
     const v = $('view');
@@ -1554,7 +1650,8 @@ const App = (() => {
       <div class="card hidden" id="doc-view" style="margin-top:14px"><h3 id="doc-title"></h3><pre id="doc-body"></pre></div>`;
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
     go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
-    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules, loadEvolution, rollbackPlaybook();
+    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules, loadEvolution, rollbackPlaybook,
+    loadLab, startResearch();
   }
 
   async function loadArchive() {
@@ -1906,7 +2003,7 @@ const App = (() => {
   const VIEWS = {
     dashboard: viewDashboard, kline: viewKline, decisions: viewDecisions,
     pool: viewPool, holdings: viewHoldings, lhb: viewLhb, review: viewReview,
-    style: viewStyle, rules: viewRules, settings: viewSettings
+    style: viewStyle, rules: viewRules, lab: viewLab, settings: viewSettings
   };
   async function route(tab, force) {
     tab = tab || (location.hash || '#dashboard').slice(1);
@@ -1944,6 +2041,7 @@ const App = (() => {
     toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore,
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
     go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
-    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules, loadEvolution, rollbackPlaybook
+    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules, loadEvolution, rollbackPlaybook,
+    loadLab, startResearch
   };
 })();

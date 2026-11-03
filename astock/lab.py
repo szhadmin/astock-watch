@@ -74,6 +74,56 @@ def monotonic(stats):
     return "非单调（没有排序能力）"
 
 
+def horizon_table(rows):
+    """持有期敏感性：同一批样本在 5/10/20 日上的表现。"""
+    out = []
+    for h in ("h5", "h10", "h20"):
+        sel = [r for r in rows if isinstance(r["result"].get("rets"), dict)
+               and r["result"]["rets"].get(h) is not None]
+        if not sel:
+            continue
+        raw = [r["result"]["rets"][h] for r in sel]
+        exc = [(r["result"].get("excess_map") or {}).get(h) for r in sel]
+        exc = [x for x in exc if x is not None] or raw
+        out.append({"期限": h.upper(), "n": len(sel),
+                    "原始%": round(sum(raw) / len(raw), 2),
+                    "超额%": round(sum(exc) / len(exc), 2),
+                    "扣费后超额%": round(sum(exc) / len(exc) - COST, 2)})
+    return out
+
+
+def state_stats(rows):
+    """分市场状态（用当时指数 20 日涨跌）：熊市 / 震荡 / 牛市。"""
+    buckets = [("熊市(指数20日<-5%)", -999, -5), ("震荡(-5%~5%)", -5, 5),
+               ("牛市(>5%)", 5, 999)]
+    out = []
+    for name, lo, hi in buckets:
+        sel = [r for r in rows if r["ctx"].get("idx20") is not None
+               and lo <= r["ctx"]["idx20"] < hi]
+        if not sel:
+            continue
+        exc = [(r["result"].get("excess")
+                if r["result"].get("excess") is not None else r["result"].get("end_ret") or 0)
+               for r in sel]
+        hits = sum(1 for r in sel if r["result"].get("hit"))
+        out.append({"状态": name, "n": len(sel),
+                    "超额%": round(sum(exc) / len(exc), 2),
+                    "扣费后超额%": round(sum(exc) / len(exc) - COST, 2),
+                    "命中率%": round(hits / len(sel) * 100, 1)})
+    return out
+
+
+def feature_stats(rows):
+    """新特征分层：评分变化率 / 量能倍数 / 距MA20偏离。"""
+    feats = [("score_chg", "评分变化率", [(-999, -5), (-5, 0), (0, 5), (5, 999)]),
+             ("vol_ratio", "量能倍数", [(0, 1), (1, 1.5), (1.5, 2.5), (2.5, 999)]),
+             ("ma20_dev", "距MA20偏离%", [(-999, -8), (-8, -2), (-2, 2), (2, 8), (8, 999)])]
+    out = {}
+    for key, label, buckets in feats:
+        out[label] = bucket_stats(rows, key, buckets)
+    return out
+
+
 def main():
     rows = load()
     if not rows:
@@ -85,41 +135,55 @@ def main():
     rets = [r["result"].get("end_ret") or 0 for r in rows]
     hits = sum(1 for r in rows if r["result"].get("hit"))
     print("全体基准：平均收益 %+.2f%%｜扣费后 %+.2f%%｜命中率 %.1f%%\n"
-          % (sum(rets) / len(rets), sum(rets) / len(rets) - COST,
-             hits / len(rows) * 100))
+          % (sum(rets) / len(rets), sum(rets) / len(rets) - COST, hits / len(rows) * 100))
 
-    print("① 综合评分分层（评分到底有没有区分度？）")
+    print("① 综合评分分层")
     st = bucket_stats(rows, "score", [(0, 40), (40, 50), (50, 60), (60, 70), (70, 101)])
     for x in st:
-        print("   %-8s n=%-5s 平均%+6s%% 扣费后%+6s%% 超额%+6s%% 扣费后超额%+6s%% 命中%5s%%"
-              % (x["档"], x.get("n"), x.get("平均收益%", "-"), x.get("扣费后%", "-"),
-                 x.get("超额%", "-"), x.get("扣费超额%", "-"), x.get("命中率%", "-")))
-    print("   → 单调性：%s\n" % monotonic(st))
+        print("   %-8s n=%-6s 超额%+6s%% 扣费后超额%+6s%% 命中%5s%%"
+              % (x["档"], x.get("n"), x.get("超额%", "-"), x.get("扣费超额%", "-"),
+                 x.get("命中率%", "-")))
+    print("   → %s\n" % monotonic([{**x, "平均收益%": x.get("超额%")} for x in st]))
 
     print("② 大盘温度分层")
     st = bucket_stats(rows, "temp", [(0, 25), (25, 40), (40, 60), (60, 75), (75, 101)])
     for x in st:
-        print("   %-8s n=%-5s 平均%+6s%% 扣费后%+6s%% 超额%+6s%% 扣费后超额%+6s%% 命中%5s%%"
-              % (x["档"], x.get("n"), x.get("平均收益%", "-"), x.get("扣费后%", "-"),
-                 x.get("超额%", "-"), x.get("扣费超额%", "-"), x.get("命中率%", "-")))
-    print("   → 单调性：%s\n" % monotonic(st))
+        print("   %-8s n=%-6s 超额%+6s%% 扣费后超额%+6s%% 命中%5s%%"
+              % (x["档"], x.get("n"), x.get("超额%", "-"), x.get("扣费超额%", "-"),
+                 x.get("命中率%", "-")))
+    print("   → %s\n" % monotonic([{**x, "平均收益%": x.get("超额%")} for x in st]))
 
-    print("③ 方向分离（看涨/看跌各自的基准）")
+    print("③ 持有期敏感性（同一批样本，5/10/20 日）")
+    for x in horizon_table(rows):
+        print("   %-4s n=%-6d 原始%+6.2f%% 超额%+6.2f%% 扣费后超额%+6.2f%%"
+              % (x["期限"], x["n"], x["原始%"], x["超额%"], x["扣费后超额%"]))
+    print()
+
+    print("④ 分市场状态（当时指数 20 日涨跌）")
+    for x in state_stats(rows):
+        print("   %-18s n=%-6d 超额%+6.2f%% 扣费后超额%+6.2f%% 命中%5.1f%%"
+              % (x["状态"], x["n"], x["超额%"], x["扣费后超额%"], x["命中率%"]))
+    print()
+
+    print("⑤ 新特征分层（扣 beta 超额）")
+    for label, stats in feature_stats(rows).items():
+        print("   %s：" % label)
+        for x in stats:
+            if not x.get("n"):
+                continue
+            print("      %-12s n=%-6s 超额%+6s%% 扣费后%+6s%% 命中%5s%%"
+                  % (x["档"], x["n"], x.get("超额%"), x.get("扣费超额%"), x.get("命中率%")))
+        print("      → %s" % monotonic([{**x, "平均收益%": x.get("超额%")} for x in stats]))
+
+    print("\n⑥ 方向分离")
     for d, name in (("bullish", "看涨"), ("bearish", "看跌")):
         sel = [r for r in rows if r["direction"] == d]
         if not sel:
             continue
         rr = [r["result"].get("end_ret") or 0 for r in sel]
         hh = sum(1 for r in sel if r["result"].get("hit"))
-        print("   %s n=%-5d 平均%+6.2f%% 命中%5.1f%%"
+        print("   %s n=%-6d 平均%+6.2f%% 命中%5.1f%%"
               % (name, len(sel), sum(rr) / len(rr), hh / len(sel) * 100))
-    print()
-
-    print("④ 持有期敏感性（当前只回填 5 日；这是上限估计，非实测）")
-    print("   5 日的扣费后基准是 %+.2f%%；若把持有期拉长，费用摊薄但波动放大。"
-          % (sum(rets) / len(rets) - COST))
-    print("   结论：如果扣费后基准≤0，说明这套'评分→方向'的映射本身没有 alpha，"
-          "换持有期也救不回来。")
 
 
 if __name__ == "__main__":

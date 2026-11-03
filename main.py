@@ -423,6 +423,12 @@ def cmd_replay(args, cfg=None):
     print("  接着运行：python main.py rules   查看哪些规则被升格")
 
 
+def cmd_lab(args, cfg=None):
+    from astock import lab
+    notify.banner("特征分层实验室  %s" % datetime.now().strftime("%Y-%m-%d %H:%M"))
+    lab.main()
+
+
 def cmd_discover(args, cfg=None):
     from astock import discover, rules
     notify.banner("规律发现  %s" % datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -594,6 +600,9 @@ def main():
     prp.add_argument("--days", type=int, default=250, help="每只股票回放多少根日线")
     prp.add_argument("--max", type=int, default=25, help="最多回放多少只股票")
     prp.set_defaults(func=cmd_replay)
+
+    pl = sub.add_parser("lab", help="特征分层：评分/温度/持有期/市场状态/新特征")
+    pl.set_defaults(func=cmd_lab)
 
     psi = sub.add_parser("discover", help="从回放样本里发现规律（含样本外验证）")
     psi.set_defaults(func=cmd_discover)

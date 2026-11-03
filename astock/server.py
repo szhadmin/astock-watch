@@ -26,9 +26,9 @@ from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import (ai_agent, altdata, backup, evolution, feed, holdings, hypothesis,
-               mailer, market, memory, monitor, paper, replay, report, rules,
-               screener)
+from . import (ai_agent, altdata, backup, discover, evolution, feed, holdings,
+               hypothesis, lab, mailer, market, memory, monitor, paper, replay,
+               report, rules, screener)
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -268,9 +268,14 @@ def run_phase(params):
         trader.phase_review()
     elif kind == "execute":
         trader.phase_execute_plans()
+    elif kind == "discover":
+        res = discover.discover(verbose=True)
+        rules.link_from_hypotheses(verbose=True)
+        return {"discover": res, "rules": rules.active_for_prompt()}
     elif kind == "replay":
         from . import discover as disc
-        res = replay.run(max_codes=int((params or {}).get("codes") or 25), verbose=True)
+        res = replay.run(max_codes=int((params or {}).get("codes") or 25),
+                         days=int((params or {}).get("days") or 600), verbose=True)
         dres = disc.discover(verbose=True)
         rules.link_from_hypotheses(verbose=True)
         return {"replay": res, "discover": dres}
@@ -698,11 +703,17 @@ def api_config_set(body):
 def api_run(body):
     kind = (body.get("kind") or "").strip()
     if kind not in ("pick", "decide", "review", "auto", "scan", "execute",
-                    "daily", "plan", "replay"):
+                    "daily", "plan", "replay", "discover"):
         return None, "未知任务类型"
     if kind == "scan":
         return api_scan(body)
-    jid, err = start_job(kind, run_phase, {"kind": kind})
+    params = {"kind": kind}
+    if kind == "replay":                       # 回放参数从页面传进来
+        if body.get("codes"):
+            params["codes"] = int(body["codes"])
+        if body.get("days"):
+            params["days"] = int(body["days"])
+    jid, err = start_job(kind, run_phase, params)
     return ({"job": jid} if jid else None), err
 
 
@@ -791,6 +802,33 @@ def _holdings_advice():
             return json.load(f).get("items") or []
     except Exception:
         return []
+
+
+def api_lab(_q):
+    """研究台：特征分层（评分/温度/持有期/市场状态/新特征）。"""
+    try:
+        rows = lab.load()
+        if not rows:
+            return {"error": "还没有回放样本，先在研究台点「历史回放」"}
+        rets = [r["result"].get("end_ret") or 0 for r in rows]
+        hits = sum(1 for r in rows if r["result"].get("hit"))
+        return {
+            "samples": len(rows),
+            "stocks": len({r["code"] for r in rows}),
+            "range": [min(r["date"] for r in rows), max(r["date"] for r in rows)],
+            "baseline": {"avg": round(sum(rets) / len(rets), 2),
+                         "net": round(sum(rets) / len(rets) - lab.COST, 2),
+                         "hit": round(hits / len(rows) * 100, 1)},
+            "score": lab.bucket_stats(rows, "score",
+                                      [(0, 40), (40, 50), (50, 60), (60, 70), (70, 101)]),
+            "temp": lab.bucket_stats(rows, "temp",
+                                     [(0, 25), (25, 40), (40, 60), (60, 75), (75, 101)]),
+            "horizon": lab.horizon_table(rows),
+            "states": lab.state_stats(rows),
+            "features": lab.feature_stats(rows),
+        }
+    except Exception as exc:                          # noqa: BLE001
+        return {"error": "分层计算失败：%s" % exc}
 
 
 def api_evolution(_q):
@@ -1176,6 +1214,7 @@ GET_ROUTES = {
     "/api/hypotheses": api_hypotheses,
     "/api/rules": api_rules,
     "/api/evolution": api_evolution,
+    "/api/lab": api_lab,
     "/api/mail": api_mail_get,
     "/api/lhb": api_lhb,
     "/api/report_archive": api_report_archive,
