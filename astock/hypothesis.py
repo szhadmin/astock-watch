@@ -34,8 +34,18 @@ def _ensure():
     os.makedirs(AI_DIR, exist_ok=True)
 
 
-def load_all():
+_CACHE = {"key": None, "data": None}
+
+
+def load_all(use_cache=True):
     _ensure()
+    try:
+        st = os.stat(PATH)
+        key = (st.st_mtime, st.st_size)
+    except OSError:
+        key = None
+    if use_cache and _CACHE["data"] is not None and _CACHE["key"] == key:
+        return _CACHE["data"]
     out = []
     if not os.path.exists(PATH):
         return out
@@ -51,6 +61,7 @@ def load_all():
                     continue
     except Exception:
         pass
+    _CACHE.update({"key": key, "data": out})
     return out
 
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from datetime import datetime
 
@@ -133,7 +134,7 @@ def replay_code(code, bars, temp_map=None, min_score=60, max_score_bear=40, verb
                     "sector_pct": None, "score": score},
             "status": "closed",
             "result": {"filled_at": datetime.now().strftime("%Y-%m-%d"),
-                       "days": len(fwd), "rets": rets, "end_ret": end_ret,
+                       "days": len(fwd), "end_ret": end_ret,
                        "max_gain": max_hi, "max_drawdown": max_lo,
                        "invalidated": broke, "hit": bool(hit),
                        "verdict": "命中" if hit else ("先破失效条件" if broke else "方向未走出来")},
@@ -177,18 +178,41 @@ def run(codes=None, days=250, max_codes=30, verbose=True, cfg=None):
     if verbose:
         print("历史温度代理：%d 个交易日（近似值，缺涨跌家数广度）" % len(temp_map))
     keys = _existing_keys()
+    done_codes = {c for (src, c, _d) in keys if src == "replay"}
+    if done_codes:
+        before = len(codes)
+        codes = [c for c in codes if c not in done_codes]
+        if verbose and before != len(codes):
+            print("续跑模式：跳过已回放的 %d 只，本轮处理 %d 只"
+                  % (before - len(codes), len(codes)))
     all_recs, stats = [], []
-    for code in codes:
-        try:
-            bars = feed.get_kline(code, 101, limit=days + HORIZON + 5)
-        except Exception as exc:                     # noqa: BLE001
-            if verbose:
-                print("  %s 取数失败：%s" % (code, exc))
+    t0 = time.time()
+    for idx, code in enumerate(codes, 1):
+        bars = None
+        for attempt in range(3):                     # 节流 + 重试，避免被限频
+            try:
+                bars = feed.get_kline(code, 101, limit=days + HORIZON + 5)
+                break
+            except Exception as exc:                 # noqa: BLE001
+                if attempt == 2 and verbose:
+                    print("  %s 取数失败：%s" % (code, exc))
+                time.sleep(1.2 * (attempt + 1))
+        if not bars:
             continue
+        time.sleep(0.15)                             # 礼貌间隔
         recs, st = replay_code(code, bars, temp_map, verbose=verbose)
         recs = [r for r in recs if ("replay", r["code"], r["date"]) not in keys]
         all_recs.extend(recs)
         stats.append(st)
+        if verbose and (idx % 10 == 0 or idx == len(codes)):
+            used = time.time() - t0
+            eta = used / idx * (len(codes) - idx)
+            print("  进度 %d/%d｜样本 %d｜已用 %.0fs｜预计剩余 %.0fs"
+                  % (idx, len(codes), len(all_recs), used, eta))
+        if len(all_recs) >= 60000:                   # 单次上限，防内存爆炸
+            if verbose:
+                print("  已达单次上限 60000 条，停止本轮（可再跑下一批）")
+            break
     if all_recs:
         os.makedirs(os.path.dirname(PATH), exist_ok=True)
         with open(PATH, "a", encoding="utf-8") as f:
@@ -202,6 +226,18 @@ def run(codes=None, days=250, max_codes=30, verbose=True, cfg=None):
               % (len(stats), len(all_recs), bull, bear, hits,
                  (hits / len(all_recs) * 100) if all_recs else 0))
     return {"codes": len(stats), "new_samples": len(all_recs), "stats": stats}
+
+
+def _top_by_amount(n):
+    """按成交额取前 n 只（覆盖全市场，避免只看候选池）。"""
+    out = []
+    try:
+        for q in feed.get_universe(size=int(n * 1.2)):
+            if q.get("code") and str(q["code"]).isdigit():
+                out.append(str(q["code"]))
+    except Exception:
+        pass
+    return out[:n]
 
 
 def _default_universe(max_codes, cfg=None):

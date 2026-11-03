@@ -252,6 +252,11 @@ def link_from_hypotheses(hypotheses=None, verbose=False):
         r["覆盖股票数"] = len({x["code"] for x in matched})
         r["最近验证"] = datetime.now().strftime("%Y-%m-%d")
         old = r["状态"]
+        if str(r.get("来源", "")).startswith("discover"):
+            r.pop("状态", None)
+            r["状态"] = "生效" if r.get("验证超额%") is not None and (r.get("验证超额%") or 0) >= 0.2 \
+                else ("候选" if (r.get("超额%") or 0) > 0 else "淘汰")
+            continue
         enough = (r.get("回放样本数", 0) >= MIN_SAMPLES
                   or r.get("实盘样本数", 0) >= MIN_SAMPLES)
         if enough and r["覆盖股票数"] >= MIN_STOCKS \
