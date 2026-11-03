@@ -393,7 +393,7 @@ class AITrader:
         return data
 
     # ---------------- ② 操盘决策 ----------------
-    def phase_decide(self, verbose=True):
+    def phase_decide(self, verbose=True, force_plan=False):
         if verbose:
             print(color("\n【② 操盘决策】收集盘面数据…", "bold"))
         snap = self._snapshot()
@@ -462,6 +462,7 @@ class AITrader:
         except Exception:
             pass
         day["gate"] = gate_info
+        day["force_plan"] = bool(force_plan)      # 收盘后复盘用：只出次日计划单，不成交
         payload = {
             "task": "decide",
             "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -528,7 +529,8 @@ class AITrader:
         results = []
         exec_cfg = {**DEFAULT_EXEC, **((self.ai_cfg or {}).get("execution") or {})}
         session_open = monitor.in_session(include_auction=False)
-        deferred = not session_open and exec_cfg.get("defer_outside_session", True)
+        deferred = bool(day.get("force_plan")) or \
+            (not session_open and exec_cfg.get("defer_outside_session", True))
         for a in actions:
             code = str(a.get("code") or "")
             act = (a.get("action") or "").upper()

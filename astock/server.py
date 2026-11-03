@@ -39,7 +39,7 @@ _CAND_CACHE = {"ts": 0.0, "data": None, "running": False}
 
 DEFAULT_SCHEDULE = {"enabled": True, "decide_every_min": 30,
                     "pick_at": "15:12", "review_at": "15:05",
-                    "report_at": "15:20"}
+                    "plan_at": "15:15", "report_at": "15:20"}
 
 ALLOWED_AI_KEYS = {"provider", "api_key", "model", "base_url", "temperature",
                    "max_tokens", "timeout_sec", "bars_in_prompt",
@@ -260,6 +260,9 @@ def run_phase(params):
         trader.phase_pick()
     elif kind == "decide":
         trader.phase_decide()
+    elif kind == "plan":
+        # 收盘后：基于当日完整日线，只生成「次日计划单」，不以收盘价成交
+        trader.phase_decide(force_plan=True)
     elif kind == "review":
         trader.phase_review()
     elif kind == "execute":
@@ -335,6 +338,7 @@ class Scheduler(threading.Thread):
         self.last_review_day = ""
         self.last_exec_day = ""
         self.last_report_day = ""
+        self.last_plan_day = ""
         self.last_equity_ts = 0.0
         self.enabled = True
 
@@ -394,6 +398,11 @@ class Scheduler(threading.Thread):
                 and not self._job_running(("pick", "scan")) and not _picked_today(today):
             self.last_pick_day = today
             start_job("pick", run_phase, {"kind": "pick"})
+        # 收盘后生成「次日买卖计划单」（基于当日完整数据，不成交）
+        if at_or_after(sch.get("plan_at", "15:15")) and self.last_plan_day != today \
+                and not self._job_running(("plan", "decide")):
+            self.last_plan_day = today
+            start_job("plan", run_phase, {"kind": "plan"})
         # 收盘后自动生成日报并归档
         if at_or_after(sch.get("report_at", "15:20")) and self.last_report_day != today \
                 and not self._job_running(("daily",)):
@@ -656,7 +665,8 @@ def api_config_set(body):
 
 def api_run(body):
     kind = (body.get("kind") or "").strip()
-    if kind not in ("pick", "decide", "review", "auto", "scan", "execute", "daily"):
+    if kind not in ("pick", "decide", "review", "auto", "scan", "execute",
+                    "daily", "plan"):
         return None, "未知任务类型"
     if kind == "scan":
         return api_scan(body)

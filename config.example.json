@@ -1,5 +1,5 @@
 {
-  "_说明": "把本文件复制为 config.json 再填自己的参数。config.json 已被 .gitignore 排除，不会提交到仓库。",
+  "_说明": "把本文件复制为 config.json 再填自己的参数。config.json 已被 .gitignore 排除。",
   "account": {
     "total_capital": 15000,
     "risk_budget_pct": 2.0,
@@ -87,12 +87,13 @@
       "forbid_sell_pct": -8.0
     },
     "schedule": {
-      "_说明": "Web 服务与 --loop 的自动调度；只在交易时段动作",
+      "_说明": "Web 服务与 --loop 的自动调度（仅交易时段动作）：决定/执行/复盘/选股/次日计划/日报的时间点",
       "enabled": true,
       "decide_every_min": 30,
       "pick_at": "15:12",
       "review_at": "15:05",
-      "report_at": "15:20"
+      "report_at": "15:20",
+      "plan_at": "15:15"
     },
     "execution": {
       "_说明": "下单执行策略：非交易时段只生成计划单，次日开盘执行（避免用收盘价事后成交）",

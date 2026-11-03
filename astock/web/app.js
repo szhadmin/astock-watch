@@ -1165,6 +1165,7 @@ const App = (() => {
           <button class="btn primary" onclick="App.run('decide')">AI 决策</button>
           <button class="btn" onclick="App.run('review')">收盘复盘</button>
           <button class="btn" onclick="App.run('daily')">生成日报</button>
+          <button class="btn" onclick="App.run('plan')">生成次日计划</button>
           <span class="spacer"></span>
           <button class="btn" onclick="App.reset()">重置模拟盘</button>
         </div>
