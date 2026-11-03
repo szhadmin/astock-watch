@@ -26,8 +26,9 @@ from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import (ai_agent, altdata, backup, feed, holdings, hypothesis, mailer,
-               market, memory, monitor, paper, report, rules, screener)
+from . import (ai_agent, altdata, backup, evolution, feed, holdings, hypothesis,
+               mailer, market, memory, monitor, paper, replay, report, rules,
+               screener)
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -267,6 +268,12 @@ def run_phase(params):
         trader.phase_review()
     elif kind == "execute":
         trader.phase_execute_plans()
+    elif kind == "replay":
+        from . import discover as disc
+        res = replay.run(max_codes=int((params or {}).get("codes") or 25), verbose=True)
+        dres = disc.discover(verbose=True)
+        rules.link_from_hypotheses(verbose=True)
+        return {"replay": res, "discover": dres}
     elif kind == "daily":
         res = report.build(cfg=cfg, verbose=True)
         try:
@@ -691,7 +698,7 @@ def api_config_set(body):
 def api_run(body):
     kind = (body.get("kind") or "").strip()
     if kind not in ("pick", "decide", "review", "auto", "scan", "execute",
-                    "daily", "plan"):
+                    "daily", "plan", "replay"):
         return None, "未知任务类型"
     if kind == "scan":
         return api_scan(body)
@@ -784,6 +791,19 @@ def _holdings_advice():
             return json.load(f).get("items") or []
     except Exception:
         return []
+
+
+def api_evolution(_q):
+    """手册版本 A/B + 错题本。"""
+    try:
+        return evolution.summary()
+    except Exception as exc:                          # noqa: BLE001
+        return {"error": str(exc)}
+
+
+def api_playbook_rollback(body):
+    ok, msg = evolution.rollback((body or {}).get("version"))
+    return ({"ok": True, "message": msg} if ok else None), (None if ok else msg)
 
 
 def api_rules(_q):
@@ -1155,6 +1175,7 @@ GET_ROUTES = {
     "/api/real_trades": api_real_trades,
     "/api/hypotheses": api_hypotheses,
     "/api/rules": api_rules,
+    "/api/evolution": api_evolution,
     "/api/mail": api_mail_get,
     "/api/lhb": api_lhb,
     "/api/report_archive": api_report_archive,
@@ -1173,6 +1194,7 @@ POST_ROUTES = {
     "/api/real_trades/delete": api_real_trades_del,
     "/api/real_trades/rebuild": api_real_trades_rebuild,
     "/api/rules/check": api_rules_lesson_check,
+    "/api/playbook/rollback": api_playbook_rollback,
     "/api/mail": api_mail_save,
     "/api/mail/test": api_mail_test,
     "/api/restore": api_restore,

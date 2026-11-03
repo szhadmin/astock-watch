@@ -20,9 +20,9 @@ import re
 import time
 from datetime import datetime
 
-from . import (altdata, feed, holdings, hypothesis, indicators as ind,
-               llm as llm_mod, mailer, market, memory, monitor, notify, paper,
-               rules as rules_mod, screener as scr)
+from . import (altdata, evolution, feed, holdings, hypothesis,
+               indicators as ind, llm as llm_mod, mailer, market, memory,
+               monitor, notify, paper, rules as rules_mod, screener as scr)
 from .notify import color
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -797,6 +797,11 @@ class AITrader:
         except Exception as exc:                       # noqa: BLE001
             judgment_rows, card = [], {}
             print(color("  （回填失败：%s）" % exc, "yellow"))
+        try:
+            mistakes = evolution.pick_mistakes(3)
+            ab = evolution.ab_report()
+        except Exception:
+            mistakes, ab = [], {}
         if verbose and judgment_rows:
             print(color("  已带 %d 条「我的判断 vs 实际结果」进入复盘"
                         % len(judgment_rows), "grey"))
@@ -816,11 +821,15 @@ class AITrader:
             "今日日记": memory.recent_journal(1, 1200),
             "我过去的判断与真实结果(务必据此改规则，别凭印象)": judgment_rows,
             "我的判断记分卡": card,
+            "我的错题本(最近判断失误，必须逐条归因)": mistakes,
+            "策略手册版本A/B(不同版本生效期间的表现)": ab,
             "我的现用手册": memory.read_playbook()[:2500],
             "要求": {
                 "输出JSON": {
                     "critique": "对今天操作的严厉评价（哪些是纪律，哪些是情绪/运气），150字内",
                     "lessons": ["≤3 条，具体到下次开盘能机械执行的规则"],
+                    "错题归因": [{"id": "错题本里的 id", "归因": "方向错|时机错|失效条件设错|运气",
+                              "说明": "一句话说清当时哪个前提错了"}],
                 },
                 "标准": ["必须指出至少一个自己的问题（哪怕是仓位偏小机会成本）",
                        "教训必须能在下次开盘时被机械执行",
@@ -867,6 +876,12 @@ class AITrader:
                     print(color("    ✘ 丢弃：%s（%s）" % (x["text"][:38], x["reason"]), "yellow"))
         except Exception as exc:                 # noqa: BLE001
             print(color("  （规则库更新失败：%s）" % exc, "yellow"))
+        try:
+            n = evolution.save_mistakes(data.get("错题归因"))
+            if verbose and n:
+                print(color("  错题本：记录 %d 条归因" % n, "grey"))
+        except Exception as exc:                 # noqa: BLE001
+            print(color("  （错题本保存失败：%s）" % exc, "yellow"))
 
         # 第二次调用：单独写手册（纯 Markdown，不塞 JSON，避免转义/截断）
         pb = None

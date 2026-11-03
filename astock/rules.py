@@ -227,7 +227,10 @@ def link_from_hypotheses(hypotheses=None, verbose=False):
     for r in d["rules"]:
         if not r.get("cond"):
             continue
-        matched = [x for x in closed if _match(r["cond"], (x.get("ctx") or {}))]
+        want_dir = r.get("方向")
+        matched = [x for x in closed
+                   if _match(r["cond"], (x.get("ctx") or {}))
+                   and (not want_dir or (x.get("direction") or "") == want_dir)]
         if not matched:
             continue
         hits = sum(1 for x in matched if x["result"].get("hit"))
@@ -238,6 +241,9 @@ def link_from_hypotheses(hypotheses=None, verbose=False):
         sign = -1.0 if forbid else 1.0
         hits_eff = (len(matched) - hits) if forbid else hits
         ret_eff = round(avg * sign, 2)
+        real = [x for x in matched if (x.get("source") or "decide") == "decide"]
+        r["实盘样本数"] = len(real)
+        r["回放样本数"] = len(matched) - len(real)
         r["样本数"] = len(matched)
         r["命中"] = hits_eff
         r["命中率"] = round(hits_eff / len(matched) * 100, 1)
@@ -246,10 +252,12 @@ def link_from_hypotheses(hypotheses=None, verbose=False):
         r["覆盖股票数"] = len({x["code"] for x in matched})
         r["最近验证"] = datetime.now().strftime("%Y-%m-%d")
         old = r["状态"]
-        if r["样本数"] >= MIN_SAMPLES and r["覆盖股票数"] >= MIN_STOCKS \
+        enough = (r.get("回放样本数", 0) >= MIN_SAMPLES
+                  or r.get("实盘样本数", 0) >= MIN_SAMPLES)
+        if enough and r["覆盖股票数"] >= MIN_STOCKS \
                 and r["命中率"] >= MIN_HIT_RATE and r["净期望%"] >= MIN_NET_EXPECT:
             r["状态"] = "生效"
-        elif r["样本数"] >= MIN_SAMPLES and (r["净期望%"] or 0) < 0:
+        elif enough and (r["净期望%"] or 0) < 0:
             r["状态"] = "淘汰"
         elif r["状态"] in ("生效", "淘汰"):
             r["状态"] = "候选"          # 证据不足时降级，避免旧结论长期挂着
@@ -276,8 +284,10 @@ def active_for_prompt(max_chars=1200):
     lines = []
     used = 0
     for r in active:
-        line = "· [%s] %s（样本%d 命中%.0f%% 净期望%+.2f%%）" % (
-            r["类别"], r["条件"], r["样本数"], r["命中率"] or 0, r["净期望%"] or 0)
+        src = ("实盘%d/回放%d" % (r.get("实盘样本数", 0), r.get("回放样本数", 0)))
+        line = "· [%s] %s（样本%d %s 命中%.0f%% 净期望%+.2f%%）" % (
+            r["类别"], r["条件"], r["样本数"], src,
+            r["命中率"] or 0, r["净期望%"] or 0)
         if used + len(line) > max_chars:
             break
         lines.append(line)

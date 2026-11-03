@@ -411,6 +411,58 @@ def cmd_ai(args, cfg):
 
 
 # --------------------------------------------------------------------------- #
+# 历史回放（造样本）/ 进化报告
+# --------------------------------------------------------------------------- #
+def cmd_replay(args, cfg=None):
+    from astock import replay, rules
+    notify.banner("历史回放  %s" % datetime.now().strftime("%Y-%m-%d %H:%M"))
+    res = replay.run(codes=args.codes or None, days=args.days,
+                     max_codes=args.max, verbose=True)
+    up = rules.link_from_hypotheses(verbose=True)
+    print("\n  规则统计已更新：判断样本 %d 条" % up["closed"])
+    print("  接着运行：python main.py rules   查看哪些规则被升格")
+
+
+def cmd_discover(args, cfg=None):
+    from astock import discover, rules
+    notify.banner("规律发现  %s" % datetime.now().strftime("%Y-%m-%d %H:%M"))
+    res = discover.discover(verbose=True)
+    if res.get("error"):
+        print("  " + res["error"])
+        return
+    rules.link_from_hypotheses(verbose=True)
+    view = rules.active_for_prompt()
+    print("\n  进入决策提示词的规则（%d 条）：" % view["active"])
+    print("    " + view["text"].replace("\n", "\n    "))
+
+
+def cmd_evolution(args, cfg=None):
+    from astock import evolution
+    notify.banner("自进化报告  %s" % datetime.now().strftime("%Y-%m-%d %H:%M"))
+    if args.rollback is not None:
+        evolution.rollback(args.rollback or None)
+        return
+    d = evolution.summary()
+    ab = d.get("playbook_ab") or {}
+    print("  策略手册版本 A/B（每版至少 %d 个样本才评价）：" % ab.get("min_samples", 15))
+    for v in ab.get("versions") or []:
+        print("    %-6s %s  %4d 字  样本%-4s 命中%-6s 净期望%-7s %s"
+              % (v.get("version"), (v.get("since") or "")[:10], v.get("chars") or 0,
+                 v.get("samples"), ("%.1f%%" % v["hit_rate_pct"]) if v.get("hit_rate_pct") is not None else "--",
+                 ("%+.2f%%" % v["net_pct"]) if v.get("net_pct") is not None else "--",
+                 v.get("verdict")))
+    sg = ab.get("suggestion") or {}
+    print("  结论：%s —— %s" % (sg.get("action"), sg.get("reason")))
+    ms = d.get("mistakes") or {}
+    print("\n  错题本：已归因 %d 条｜%s" % (ms.get("total") or 0, ms.get("by_cause") or {}))
+    pend = ms.get("pending") or []
+    if pend:
+        print("  待归因的错题：")
+        for m in pend:
+            print("    %s %s｜判断%s｜%s" % (m["date"], m["标的"], m["我的判断"], m["实际结果"]))
+
+
+# --------------------------------------------------------------------------- #
 # 经验规则库
 # --------------------------------------------------------------------------- #
 def cmd_rules(args, cfg=None):
@@ -536,6 +588,19 @@ def main():
     pai.add_argument("--doctor", action="store_true",
                      help="一键体检：网关/JSON/围栏/截断/双调用/风控")
     pai.set_defaults(func=cmd_ai)
+
+    prp = sub.add_parser("replay", help="历史回放：批量生成带结果的判断样本")
+    prp.add_argument("codes", nargs="*")
+    prp.add_argument("--days", type=int, default=250, help="每只股票回放多少根日线")
+    prp.add_argument("--max", type=int, default=25, help="最多回放多少只股票")
+    prp.set_defaults(func=cmd_replay)
+
+    psi = sub.add_parser("discover", help="从回放样本里发现规律（含样本外验证）")
+    psi.set_defaults(func=cmd_discover)
+
+    pe = sub.add_parser("evolution", help="自进化报告：手册版本A/B + 错题本")
+    pe.add_argument("--rollback", nargs="?", const="", help="回滚手册（默认上一版）")
+    pe.set_defaults(func=cmd_evolution)
 
     pr = sub.add_parser("rules", help="经验规则库：查看/体检/统计升格")
     pr.add_argument("--migrate", action="store_true", help="把现有教训做可证伪性体检并入库")

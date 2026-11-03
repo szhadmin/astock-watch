@@ -1301,8 +1301,14 @@ const App = (() => {
     v.innerHTML = `<div class="card"><h3>经验规则库</h3>
       <div class="dim" style="font-size:12px">AI 每次复盘写的"教训"会先过可证伪性体检：没有数字阈值的直接丢弃；
       有样本与统计支撑（样本≥20、覆盖≥10 只股票、命中率≥55%、扣费后净期望≥0.3%）才能升格为「生效」并进入决策提示词。</div>
-      <div id="rules-box" style="margin-top:12px"><div class="dim">加载中…</div></div></div>`;
+      <div class="row" style="margin-top:10px">
+          <button class="btn primary tiny" onclick="App.run('replay')">历史回放（批量造样本）</button>
+          <span class="dim" style="font-size:12px">用历史日线回放决策，几分钟生成上千条带结果的判断样本</span>
+        </div>
+        <div id="rules-box" style="margin-top:12px"><div class="dim">加载中…</div></div>
+        <div id="evo-box" style="margin-top:16px" class="dim">加载中…</div></div>`;
     loadRules();
+    loadEvolution();
   }
 
   async function loadRules() {
@@ -1336,6 +1342,53 @@ const App = (() => {
         + `<div class="dim" style="margin-top:8px;font-size:12px">
              提示词里当前写给 AI 的规则：<code>${esc(((d.prompt_view || {}).text || '').slice(0, 300))}</code></div>`;
     } catch (e) { box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>'; }
+  }
+
+
+  async function loadEvolution() {
+    const box = $('evo-box');
+    if (!box) return;
+    try {
+      const d = await api('/api/evolution');
+      const ab = d.playbook_ab || {};
+      const sg = ab.suggestion || {};
+      const rows = (ab.versions || []).map(v => `<tr>
+          <td class="l mono">${esc(v.version)} ${v.active ? '<span class="tag ok">当前</span>' : ''}</td>
+          <td class="dim mono">${esc((v.since || '').slice(0, 10))}</td>
+          <td>${v.chars || 0} 字</td>
+          <td>${v.samples || 0}</td>
+          <td class="${(v.hit_rate_pct || 0) >= 55 ? 'up' : 'dim'}">${v.hit_rate_pct === null || v.hit_rate_pct === undefined ? '--' : n2(v.hit_rate_pct, 1) + '%'}</td>
+          <td class="${(v.net_pct || 0) > 0 ? 'up' : 'down'}">${v.net_pct === null || v.net_pct === undefined ? '--' : n2(v.net_pct, 2) + '%'}</td>
+          <td class="dim">${esc(v.verdict || '')}</td></tr>`).join('');
+      const ms = d.mistakes || {};
+      const causes = Object.entries(ms.by_cause || {}).map(([k, v]) => `<span class="tag">${esc(k)} ${v}</span>`).join('');
+      const pend = (ms.pending || []).map(m => `<div class="item">
+          <div class="row"><b>${esc(m['标的'])}</b><span class="dim mono" style="font-size:11px">${esc(m.date)}</span>
+            <span class="tag">判断${esc(m['我的判断'])}</span></div>
+          <div class="meta">依据：${esc(m['当时依据'])}</div>
+          <div class="meta">结果：${esc(m['实际结果'])}</div></div>`).join('');
+      box.innerHTML = `
+        <h3>策略手册版本 A/B（每版至少 ${ab.min_samples || 15} 个样本才评价）</h3>
+        ${rows ? `<table><thead><tr><th>版本</th><th>生效日</th><th>篇幅</th><th>样本</th><th>命中率</th><th>净期望</th><th>结论</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="dim">还没有版本记录（AI 重写手册时会自动登记）</div>'}
+        <div class="row" style="margin-top:8px">
+          <span class="tag ${sg.action === 'rollback' ? 'warn' : 'ok'}">建议：${esc(sg.action || '-')}</span>
+          <span class="dim" style="font-size:12px">${esc(sg.reason || '')}</span>
+          <span class="spacer"></span>
+          ${sg.action === 'rollback' ? `<button class="btn" onclick="App.rollbackPlaybook('${esc(sg.target || '')}')">回滚到 ${esc(sg.target || '上一版')}</button>` : ''}
+        </div>
+        <h3 style="margin-top:14px">错题本（已归因 ${ms.total || 0} 条）</h3>
+        <div class="row">${causes || '<span class="dim">还没有归因记录</span>'}</div>
+        <div class="list" style="margin-top:8px;max-height:260px">${pend || '<div class="dim">暂无待归因错题（复盘时 AI 会自动归因）</div>'}</div>`;
+    } catch (e) { box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>'; }
+  }
+
+  async function rollbackPlaybook(version) {
+    if (!confirm('回滚策略手册到 ' + (version || '上一版') + '？当前版本已备份，可再切回。')) return;
+    try {
+      const r = await post('/api/playbook/rollback', { version: version || '' });
+      toast(r.message || '已回滚');
+      loadEvolution(); loadStyle && loadStyle();
+    } catch (e) { toast('回滚失败：' + e.message, true); }
   }
 
   /* ---------------- 页面：龙虎榜（全市场） ---------------- */
@@ -1501,7 +1554,7 @@ const App = (() => {
       <div class="card hidden" id="doc-view" style="margin-top:14px"><h3 id="doc-title"></h3><pre id="doc-body"></pre></div>`;
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
     go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
-    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules();
+    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules, loadEvolution, rollbackPlaybook();
   }
 
   async function loadArchive() {
@@ -1891,6 +1944,6 @@ const App = (() => {
     toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore,
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
     go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
-    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules
+    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules, loadEvolution, rollbackPlaybook
   };
 })();

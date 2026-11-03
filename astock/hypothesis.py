@@ -217,8 +217,13 @@ def backfill(cfg=None, verbose=False):
     return {"checked": len(todo), "filled": filled}
 
 
-def recent(n=10, only_closed=True):
+def recent(n=10, only_closed=True, source="decide"):
+    """默认只取真实决策产生的判断（回放样本只用于统计，不喂给复盘）。"""
     items = [x for x in load_all() if x.get("result")] if only_closed else load_all()
+    if source == "decide":
+        items = [x for x in items if (x.get("source") or "decide") == "decide"]
+    elif source:
+        items = [x for x in items if x.get("source") == source]
     items.sort(key=lambda x: (x.get("date") or "", x.get("id") or ""), reverse=True)
     return items[:n]
 

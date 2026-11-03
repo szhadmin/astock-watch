@@ -85,7 +85,11 @@ def save_playbook(text, tag="update"):
         f.write(text)
     _snapshot_playbook(text, tag)
     return True
-
+    try:
+        from . import evolution
+        evolution.snapshot_playbook(text, tag=tag)
+    except Exception:
+        pass
 
 def _snapshot_playbook(text, tag):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
