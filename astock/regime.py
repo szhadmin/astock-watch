@@ -115,8 +115,8 @@ def policy(regime=None):
                      "note": "震荡·窄幅缩量：没有机会，最该收手"},
         "宽幅剧震": {"max_position_pct": 30.0, "min_score": 60,
                      "note": "震荡·宽幅剧震：有波段可做，小仓试错"},
-        "常规震荡": {"max_position_pct": 28.0, "min_score": 65,
-                     "note": "震荡·常规：要求高评分再动手"},
+        "常规震荡": {"max_position_pct": 30.0, "min_score": 62,
+                     "note": "震荡·常规：回放验证这里做多有效（超额 +0.5pp），可正常参与但要求评分≥62"},
     }
     out = dict(table.get(sub, {"max_position_pct": 25.0, "min_score": 65,
                                "note": "市场状态未知：保守"}))
