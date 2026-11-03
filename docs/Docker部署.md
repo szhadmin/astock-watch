@@ -46,6 +46,39 @@ curl -u admin:你的密码 http://127.0.0.1:8770/api/overview
 
 > **端口权限**：除了服务器本机防火墙（`ufw`），云厂商的**安全组**也要放行 8770。
 
+## 三之二、用域名 + HTTPS（推荐，服务器上已有 Caddy）
+
+如果服务器上已经有 Caddy（或 nginx）在管 80/443，最省事的做法是：**应用只绑 127.0.0.1，由反向代理对外**。
+
+`docker-compose.prod.yml` 里把端口改成只绑本机：
+
+```yaml
+    ports:
+      - "127.0.0.1:8770:8770"
+```
+
+在 `Caddyfile` 里加一段（Caddy 会自动申请 Let's Encrypt 证书，前提是该子域名的 A 记录指向本机）：
+
+```caddyfile
+astock.example.com {
+    reverse_proxy 127.0.0.1:8770 {
+        flush_interval -1
+        transport http {
+            read_timeout 300s
+            write_timeout 300s
+        }
+    }
+    encode gzip
+}
+```
+
+然后 `caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy`，
+几十秒后 `https://astock.example.com` 就能用（证书在 `/var/lib/caddy/.local/share/caddy/certificates/`）。
+
+> 有泛域名解析（`*.example.com` → 本机）时，新子域名无需再单独加 A 记录。
+
+
+
 ## 四、数据持久化（重要）
 
 | 宿主机 | 容器内 | 内容 |

@@ -133,8 +133,8 @@ const App = (() => {
     const form = `
       <div class="row" style="margin-bottom:8px;gap:6px">
         <input id="t-date" type="date" style="width:130px">
-        <input id="t-code" placeholder="代码" style="width:90px">
-        <select id="t-side" style="width:90px"><option value="BUY">买入</option><option value="SELL">卖出</option></select>
+        <input id="t-code" class="stock-pick" data-sell-fill placeholder="代码/名称" style="width:120px">
+        <select id="t-side" style="width:90px" onchange="App.onTradeSideChange(this.value)"><option value="BUY">买入</option><option value="SELL">卖出</option></select>
         <input id="t-shares" type="number" step="100" placeholder="股数" style="width:96px">
         <input id="t-price" type="number" step="0.001" placeholder="价格" style="width:96px">
         <input id="t-fee" type="number" step="0.01" placeholder="费用" style="width:84px">
@@ -173,6 +173,19 @@ const App = (() => {
         </div>
       </div>
     </div>`;
+  }
+
+  function onTradeSideChange(side) {
+    const box = $('t-code');
+    if (!box) return;
+    box.value = '';
+    if (side === 'SELL') {
+      box.dataset.mode = 'held';
+      box.placeholder = '只显示已持有';
+    } else {
+      delete box.dataset.mode;
+      box.placeholder = '代码/名称';
+    }
   }
 
   async function addRealTrade() {
@@ -327,6 +340,133 @@ const App = (() => {
       const r = await post('/api/mail/test', {});
       toast(r.message || (r.ok ? '已发送' : '发送失败'), !r.ok);
     } catch (e) { toast('发送失败：' + e.message, true); }
+  }
+
+  /* ---------------- 股票搜索下拉（代码/名称/拼音） ---------------- */
+  const SP = { box: null, items: [], idx: -1, input: null, heldOnly: false };
+
+  function spEnsure() {
+    if (SP.box) return;
+    const box = document.createElement('div');
+    box.className = 'sp-list hidden';
+    box.id = 'sp-list';
+    document.body.appendChild(box);
+    SP.box = box;
+    box.addEventListener('mousedown', (ev) => {      // mousedown：先于 blur
+      const it = ev.target.closest('[data-code]');
+      if (!it) return;
+      ev.preventDefault();
+      spPick(it.dataset.code, it.dataset.name, it.dataset.shares);
+    });
+  }
+
+  function spHide() {
+    if (SP.box) { SP.box.classList.add('hidden'); SP.box.innerHTML = ''; }
+    SP.items = []; SP.idx = -1; SP.input = null;
+  }
+
+  function spRender() {
+    const box = SP.box;
+    if (!SP.items.length) { spHide(); return; }
+    box.classList.remove('hidden');
+    box.innerHTML = SP.items.map((x, i) => `
+      <div class="sp-item ${i === SP.idx ? 'on' : ''}" data-code="${esc(x.code)}"
+           data-name="${esc(x.name || '')}" data-shares="${x.shares || ''}">
+        <span class="sp-code mono">${esc(x.code)}</span>
+        <span class="sp-name">${esc(x.name || '')}</span>
+        ${x.shares !== undefined && x.shares !== null
+        ? `<span class="sp-meta">持 ${x.shares} 股${x.cost ? ' · 成本 ' + n2(x.cost, 3) : ''}</span>` : ''}
+      </div>`).join('');
+  }
+
+  function spPosition(input) {
+    const r = input.getBoundingClientRect();
+    const box = SP.box;
+    box.style.left = (r.left + window.scrollX) + 'px';
+    box.style.top = (r.bottom + window.scrollY + 4) + 'px';
+    box.style.minWidth = Math.max(240, r.width + 120) + 'px';
+  }
+
+  function spPick(code, name, shares) {
+    const input = SP.input;
+    if (!input) return;
+    input.value = code;
+    input.dataset.name = name || '';
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    const row = input.closest('tr');
+    if (row && shares && input.hasAttribute('data-sell-fill')) {
+      const sh = row.querySelector('.t-shares');
+      if (sh && !sh.value) sh.value = shares;
+    }
+    const hint = input.parentElement && input.parentElement.querySelector('.sp-name-hint');
+    if (hint) hint.textContent = name || '';
+    spHide();
+  }
+
+  async function spQuery(input) {
+    spEnsure();
+    SP.input = input;
+    const q = (input.value || '').trim();
+    const heldOnly = input.dataset.mode === 'held';
+    if (heldOnly) {
+      try {
+        const r = await api('/api/held');
+        const rows = (r.items || []).filter(x =>
+          !q || x.code.includes(q) || (x.name || '').includes(q));
+        SP.items = rows;
+        SP.idx = rows.length ? 0 : -1;
+        spPosition(input);
+        spRender();
+      } catch (e) { spHide(); }
+      return;
+    }
+    if (q.length < 1) { spHide(); return; }
+    try {
+      const r = await api('/api/search?q=' + encodeURIComponent(q) + '&limit=8');
+      if (SP.input !== input) return;                // 已被新的输入取代
+      SP.items = r.items || [];
+      SP.idx = SP.items.length ? 0 : -1;
+      spPosition(input);
+      spRender();
+    } catch (e) { spHide(); }
+  }
+
+  /* 全局事件委托：任何 input.stock-pick 都能用 */
+  function initStockPicker() {
+    if (window.__spInit) return;
+    window.__spInit = true;
+    document.addEventListener('focusin', (ev) => {
+      const el = ev.target;
+      if (el && el.classList && el.classList.contains('stock-pick')) spQuery(el);
+    });
+    document.addEventListener('input', (ev) => {
+      const el = ev.target;
+      if (el && el.classList && el.classList.contains('stock-pick')) {
+        clearTimeout(el.__spTimer);
+        el.__spTimer = setTimeout(() => spQuery(el), 180);
+      }
+    });
+    document.addEventListener('keydown', (ev) => {
+      const el = ev.target;
+      if (!el || !el.classList || !el.classList.contains('stock-pick')) return;
+      if (!SP.items.length) return;
+      if (ev.key === 'ArrowDown') {
+        ev.preventDefault(); SP.idx = Math.min(SP.idx + 1, SP.items.length - 1); spRender();
+      } else if (ev.key === 'ArrowUp') {
+        ev.preventDefault(); SP.idx = Math.max(SP.idx - 1, 0); spRender();
+      } else if (ev.key === 'Enter') {
+        if (SP.idx >= 0) {
+          ev.preventDefault();
+          const x = SP.items[SP.idx];
+          spPick(x.code, x.name, x.shares);
+        }
+      } else if (ev.key === 'Escape') { spHide(); }
+    });
+    document.addEventListener('click', (ev) => {
+      if (SP.box && !SP.box.contains(ev.target)
+          && !(ev.target.classList && ev.target.classList.contains('stock-pick'))) spHide();
+    });
+    window.addEventListener('scroll', spHide, true);
   }
 
   /* ---------------- 页面：仪表盘（局部刷新，不闪） ---------------- */
@@ -673,7 +813,7 @@ const App = (() => {
         <div class="row">
           <h3 style="margin:0">行情</h3>
           <span class="spacer"></span>
-          <input id="kline-code" placeholder="6 位代码" value="${esc(st.code)}" style="width:110px"
+          <input id="kline-code" class="stock-pick" placeholder="代码/名称/拼音" value="${esc(st.code)}" style="width:150px"
                  onkeydown="if(event.key==='Enter')App.openKline(this.value)">
           <button class="btn tiny" onclick="App.openKline(document.getElementById('kline-code').value)">查看</button>
           <select id="kline-kdays" style="width:96px" onchange="App.setKlineDays(this.value)">
@@ -1162,7 +1302,7 @@ const App = (() => {
         <th style="width:110px">代码</th><th style="width:100px">股数</th><th style="width:100px">成本价</th>
         <th style="width:130px">买入日期</th><th>备注</th><th style="width:60px"></th></tr></thead><tbody>
       ${st.items.map((it, i) => `<tr>
-        <td><input class="h-code" data-i="${i}" value="${esc(it.code || '')}" placeholder="6位" style="width:96px"></td>
+        <td><input class="h-code stock-pick" data-i="${i}" value="${esc(it.code || '')}" placeholder="代码/名称" style="width:110px"></td>
         <td><input class="h-shares" data-i="${i}" type="number" step="100" value="${it.shares || ''}" style="width:88px"></td>
         <td><input class="h-cost" data-i="${i}" type="number" step="0.001" value="${it.cost || ''}" style="width:88px"></td>
         <td><input class="h-date" data-i="${i}" type="date" value="${esc(it.date || '')}" style="width:120px"></td>
@@ -1522,7 +1662,7 @@ const App = (() => {
           <select id="lhb-days" style="width:110px" onchange="App.loadLhb(this.value, document.getElementById('lhb-code').value)">
             ${[7, 15, 30, 60].map(d => `<option value="${d}" ${d === st.days ? 'selected' : ''}>近 ${d} 日</option>`).join('')}
           </select>
-          <input id="lhb-code" placeholder="可选：6位代码" value="${esc(st.code)}" style="width:130px"
+          <input id="lhb-code" class="stock-pick" placeholder="可选：代码/名称" value="${esc(st.code)}" style="width:150px"
                  onkeydown="if(event.key==='Enter')App.loadLhb(document.getElementById('lhb-days').value, this.value)">
           <button class="btn primary" onclick="App.loadLhb(document.getElementById('lhb-days').value, document.getElementById('lhb-code').value)">查询</button>
         </div>
@@ -1675,7 +1815,7 @@ const App = (() => {
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
     go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
     loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules, loadEvolution, rollbackPlaybook,
-    loadLab, startResearch, loadPriors();
+    loadLab, startResearch, loadPriors, onTradeSideChange();
   }
 
   async function loadArchive() {

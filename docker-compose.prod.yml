@@ -1,10 +1,10 @@
-# 生产部署（公网服务器）：应用 + nginx 密码认证反向代理
+# 生产部署（无认证直连版，仅自用）
 #
 #   cp config.example.json config.json    # 填 ai.api_key
-#   printf 'admin:%s\n' "$(openssl passwd -apr1 '你的密码')" > docker/.htpasswd
 #   docker compose -f docker-compose.prod.yml up -d --build
 #
-# 应用本身不对外发布端口，只能通过 nginx（带密码）访问。
+# 直接发布 8770 端口，浏览器访问 http://<服务器IP>:8770
+# 注意：没有密码认证 —— 知道 IP 的人就能打开控制台并消耗你的模型额度。
 
 services:
   app:
@@ -12,43 +12,33 @@ services:
       context: .
       args:
         WITH_AKSHARE: "0"     # 需要财报/龙虎榜时改 1（镜像更大，构建更慢）
+        # 国内服务器必须给镜像源，否则 pip 装 pandas 会慢到超时
+        PIP_INDEX_URL: "https://pypi.tuna.tsinghua.edu.cn/simple"
     image: astock-watch:latest
     container_name: astock-core
     restart: unless-stopped
+
+    ports:
+      - "8770:8770"
+
     environment:
       TZ: Asia/Shanghai
       PORT: "8770"
+
     volumes:
       - ./config.json:/app/config.json:ro
       - ./data:/app/data
       - ./backups:/app/backups
-    expose:
-      - "8770"
+
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8770/api/overview',timeout=5).status==200 else 1)"]
       interval: 30s
       timeout: 6s
       start_period: 25s
       retries: 3
+
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-
-  web:
-    image: nginx:alpine
-    container_name: astock-web
-    restart: unless-stopped
-    depends_on:
-      - app
-    ports:
-      - "8770:80"
-    volumes:
-      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./docker/.htpasswd:/etc/nginx/.htpasswd:ro
-    logging:
-      driver: json-file
-      options:
-        max-size: "5m"
-        max-file: "2"

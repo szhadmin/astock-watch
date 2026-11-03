@@ -18,8 +18,14 @@ WORKDIR /app
 # 可选依赖（akshare 会带 pandas/numpy，镜像会大不少）
 COPY requirements-optional.txt /app/requirements-optional.txt
 ARG WITH_AKSHARE=0
+# 国内服务器建议换成镜像源：--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_INDEX_URL=
 RUN if [ "$WITH_AKSHARE" = "1" ]; then \
-      pip install --no-cache-dir -r /app/requirements-optional.txt ; \
+      if [ -n "$PIP_INDEX_URL" ]; then \
+        pip install --no-cache-dir --timeout 60 -i "$PIP_INDEX_URL" -r /app/requirements-optional.txt ; \
+      else \
+        pip install --no-cache-dir --timeout 60 -r /app/requirements-optional.txt ; \
+      fi ; \
     fi
 
 COPY . /app

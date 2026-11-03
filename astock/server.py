@@ -743,6 +743,27 @@ def api_jobs(_q):
             "account_busy": ACCOUNT_LOCK.locked()}
 
 
+def api_search(q):
+    """股票搜索：代码 / 名称 / 拼音首字母。"""
+    kw = (q.get("q") or [""])[0]
+    try:
+        limit = int((q.get("limit") or ["10"])[0])
+    except ValueError:
+        limit = 10
+    try:
+        return {"items": feed.search_stock(kw, limit)}
+    except Exception as exc:                          # noqa: BLE001
+        return {"items": [], "error": str(exc)}
+
+
+def api_held(_q):
+    """当前持有的股票（我的持仓表 + 成交流水推导），供"卖出"选择。"""
+    try:
+        return {"items": holdings.held_positions()}
+    except Exception as exc:                          # noqa: BLE001
+        return {"items": [], "error": str(exc)}
+
+
 def api_priors(_q):
     """系统已验证的先验（代码维护，AI 不可修改）。"""
     return {"items": priors.VERIFIED, "text": priors.text()}
@@ -1223,6 +1244,8 @@ GET_ROUTES = {
     "/api/market": api_market,
     "/api/regime": api_regime,
     "/api/priors": api_priors,
+    "/api/search": api_search,
+    "/api/held": api_held,
     "/api/altstatus": api_altstatus,
     "/api/altdata": api_altdata,
     "/api/holdings": api_holdings,

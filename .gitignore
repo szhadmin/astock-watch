@@ -31,3 +31,11 @@ desktop.ini
 *.tmp
 *.bak
 *.orig
+# 本地临时脚本（部署/调试用，含服务器信息，禁止入库）
+_*.py
+_*.js
+_*.txt
+deploy_*.py
+sync_*.py
+replay*.log
+*_err.log

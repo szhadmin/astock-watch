@@ -159,3 +159,15 @@ pre{background:#080d16;border:1px solid var(--line);border-radius:8px;padding:12
 /* 局部刷新过渡：数据更新时轻微高亮，避免整页闪烁 */
 #view{transition:opacity .18s ease}
 #view.soft-updated{opacity:.86}
+
+/* ---------- 股票搜索下拉 ---------- */
+.sp-list{position:absolute;z-index:9999;background:#0e1622;border:1px solid #24354d;
+  border-radius:8px;box-shadow:0 12px 30px rgba(0,0,0,.55);overflow:hidden;max-height:320px;overflow-y:auto}
+.sp-list.hidden{display:none}
+.sp-item{display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid #16202e}
+.sp-item:last-child{border-bottom:0}
+.sp-item:hover,.sp-item.on{background:#16273c}
+.sp-code{color:#e8c46a;min-width:56px}
+.sp-name{flex:1;color:#dfe7f3}
+.sp-meta{color:#7d8ea6;font-size:11px}
+.sp-name-hint{color:#7d8ea6;font-size:11px;margin-left:6px}

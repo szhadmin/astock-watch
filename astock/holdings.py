@@ -229,6 +229,12 @@ def add_trade(rec):
     price = float(rec.get("price") or 0)
     if shares <= 0 or price <= 0:
         raise ValueError("股数与价格必须大于 0")
+    if side == "SELL":
+        held = _held_shares(code)
+        if held <= 0:
+            raise ValueError("你当前没有持有 %s，不能记录卖出" % code)
+        if shares > held:
+            raise ValueError("卖出 %d 股超过当前持仓 %d 股" % (shares, held))
     name = (rec.get("name") or "").strip()
     if not name:
         try:
@@ -247,6 +253,61 @@ def add_trade(rec):
     items.sort(key=lambda x: (x["date"], x["id"]))
     _save_trades(items)
     return items[-1]
+
+
+def _held_shares(code):
+    """当前持有股数：流水推导 与 手工持仓表 取较大值（兼容两种记账方式）。"""
+    held = 0
+    try:
+        pos, _c, _s = replay()
+        held = int((pos.get(code) or {}).get("shares") or 0)
+    except Exception:
+        pass
+    try:
+        for it in (load().get("items") or []):
+            if it.get("code") == code:
+                held = max(held, int(it.get("shares") or 0))
+    except Exception:
+        pass
+    return held
+
+
+def _fill_names(items):
+    """持仓里名称为空的，补一次行情名称（失败就算了）。"""
+    for it in items:
+        if it.get("name"):
+            continue
+        try:
+            q = feed.get_quote(it["code"])
+            it["name"] = q.get("name") or ""
+        except Exception:
+            pass
+    return items
+
+
+def held_positions():
+    """当前持有的股票列表（供"卖出"下拉选择）。"""
+    out = {}
+    try:
+        pos, _c, _s = replay()
+        for c, p in (pos or {}).items():
+            out[c] = {"code": c, "name": p.get("name") or "",
+                      "shares": int(p.get("shares") or 0),
+                      "cost": p.get("cost"), "source": "成交流水"}
+    except Exception:
+        pass
+    try:
+        for it in (load().get("items") or []):
+            c = it.get("code")
+            cur = out.get(c) or {}
+            out[c] = {"code": c,
+                      "name": cur.get("name") or it.get("name") or "",
+                      "shares": max(int(cur.get("shares") or 0), int(it.get("shares") or 0)),
+                      "cost": cur.get("cost") or it.get("cost"),
+                      "source": "持仓表" if not cur else "持仓表+流水"}
+    except Exception:
+        pass
+    return _fill_names(sorted(out.values(), key=lambda x: x["code"]))
 
 
 def del_trade(tid):

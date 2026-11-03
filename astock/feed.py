@@ -269,6 +269,65 @@ def get_indices() -> list:
 # --------------------------------------------------------------------------- #
 # 指数 / 板块（大盘温度、板块强度用）
 # --------------------------------------------------------------------------- #
+def search_stock(keyword, limit=10):
+    """全市场搜索：代码 / 名称 / 拼音首字母（东财 suggest 接口）。
+
+    返回 [{"code","name","pinyin","market"}]；失败时回退到本地股票池模糊匹配。
+    东财返回的 SecurityTypeName 是「沪A/深A/京A/台股」等，只保留 A 股。
+    """
+    import urllib.parse
+    import urllib.request
+
+    kw = str(keyword or "").strip()
+    if not kw:
+        return []
+    url = ("https://searchapi.eastmoney.com/api/suggest/get?input=%s&type=14"
+           "&token=D43BF722C8E33BDC906FB84D85E326E8&count=%d"
+           % (urllib.parse.quote(kw), max(1, int(limit)) * 2))
+    A_TYPES = ("沪A", "深A", "京A", "科创板", "创业板")
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+            "Accept": "*/*",
+            "Referer": "https://www.eastmoney.com/",
+        })
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        rows = ((data.get("QuotationCodeTable") or {}).get("Data") or [])
+        out = []
+        for x in rows:
+            code = str(x.get("Code") or "")
+            if not (code.isdigit() and len(code) == 6):
+                continue
+            if code[0] not in "0369":
+                continue
+            stype = str(x.get("SecurityTypeName") or "")
+            classify = str(x.get("Classify") or "")
+            if stype and stype not in A_TYPES and classify != "AStock":
+                continue
+            out.append({"code": code, "name": x.get("Name") or "",
+                        "pinyin": str(x.get("PinYin") or "").upper(),
+                        "market": str(x.get("MktNum") or "")})
+            if len(out) >= limit:
+                break
+        if out:
+            return out
+    except Exception:
+        pass
+    out = []
+    try:
+        for it in get_universe(size=500):
+            c, n = str(it.get("code") or ""), str(it.get("name") or "")
+            if kw in c or kw in n:
+                out.append({"code": c, "name": n, "pinyin": "", "market": ""})
+            if len(out) >= limit:
+                break
+    except Exception:
+        pass
+    return out
+
+
 def get_kline_secid(sid: str, klt: int = 101, limit: int = 60, adjust: int = 0) -> list:
     """按 secid 直接取 K 线（用于指数：1.000001 上证、0.399001 深成等）。"""
     url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
