@@ -27,8 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import (ai_agent, altdata, backup, discover, evolution, feed, holdings,
-               hypothesis, lab, mailer, market, memory, monitor, paper, replay,
-               report, rules, screener)
+               hypothesis, lab, mailer, market, memory, monitor, paper, regime,
+               replay, report, rules, screener)
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -743,6 +743,15 @@ def api_jobs(_q):
             "account_busy": ACCOUNT_LOCK.locked()}
 
 
+def api_regime(_q):
+    """市场状态细分（牛/熊/窄幅缩量/宽幅剧震/常规震荡）+ 对应策略。"""
+    try:
+        r = regime.now()
+        return {"regime": r, "policy": regime.policy(r)}
+    except Exception as exc:                          # noqa: BLE001
+        return {"error": str(exc)}
+
+
 def api_market(_q):
     """大盘温度 + 行业板块强度 + 当前收紧策略（前端仪表盘用）。"""
     try:
@@ -826,6 +835,7 @@ def api_lab(_q):
             "horizon": lab.horizon_table(rows),
             "states": lab.state_stats(rows),
             "features": lab.feature_stats(rows),
+            "regime": lab.regime_stats(rows),
         }
     except Exception as exc:                          # noqa: BLE001
         return {"error": "分层计算失败：%s" % exc}
@@ -1206,6 +1216,7 @@ GET_ROUTES = {
     "/api/config": api_config_get,
     "/api/backups": api_backups,
     "/api/market": api_market,
+    "/api/regime": api_regime,
     "/api/altstatus": api_altstatus,
     "/api/altdata": api_altdata,
     "/api/holdings": api_holdings,

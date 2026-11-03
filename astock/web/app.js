@@ -1275,6 +1275,9 @@ const App = (() => {
           <div><div class="dim" style="font-size:12px">建议</div>
             <div class="${r.tone === 'danger' ? 'down' : (r.tone === 'warn' ? 'warn' : 'up')}">${esc(r.advice)}</div>
             <div class="dim" style="font-size:12px">距止损 ${r.dist_stop_pct === null ? '--' : n2(r.dist_stop_pct) + '%'}</div></div>
+          <div><div class="dim" style="font-size:12px">仓位评价（按信号强度）</div>
+            <div>${esc(r.sizing || '-')}</div>
+            <div class="dim" style="font-size:12px">建议上限 ${r.suggest_cap_pct === null || r.suggest_cap_pct === undefined ? '--' : n2(r.suggest_cap_pct, 1) + '%'}</div></div>
         </div>
         ${r.note ? `<div class="dim" style="margin-top:6px;font-size:12px">备注：${esc(r.note)}</div>` : ''}
       </div>`;
@@ -1383,6 +1386,11 @@ const App = (() => {
         <div class="grid g2" style="margin-top:14px">
           <div class="card"><h3>持有期敏感性</h3>${tbl(d.horizon, ['期限', 'n', '原始%', '超额%', '扣费后超额%'])}</div>
           <div class="card"><h3>市场状态</h3>${tbl(d.states, ['状态', 'n', '超额%', '扣费后超额%', '命中率%'])}</div>
+        </div>
+        <div class="card" style="margin-top:14px"><h3>市场状态细分（震荡市拆三层）</h3>
+          <div class="dim" style="font-size:12px;margin-bottom:6px">
+            结论：窄幅缩量＝真垃圾时间（超额为负，收手）；宽幅剧震＝超额最高（有波段可做）；常规震荡介于中间。</div>
+          ${tbl(d.regime || [], ['状态细分', 'n', '超额%', '扣费后超额%', '命中率%'])}
         </div>
         <div class="card" style="margin-top:14px"><h3>新特征分层</h3>
           ${Object.entries(feat).map(([k, rows]) =>
