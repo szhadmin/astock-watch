@@ -20,8 +20,9 @@ import re
 import time
 from datetime import datetime
 
-from . import (altdata, feed, holdings, indicators as ind, llm as llm_mod, mailer,
-               market, memory, monitor, notify, paper, screener as scr)
+from . import (altdata, feed, holdings, hypothesis, indicators as ind,
+               llm as llm_mod, mailer, market, memory, monitor, notify, paper,
+               screener as scr)
 from .notify import color
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -559,6 +560,10 @@ class AITrader:
             "【操盘】%s\n%s\n执行：%s" % (view, data.get("journal", ""),
                                     "\n".join(results) if results else "无操作"),
             phase="操盘")
+        try:
+            hypothesis.record_from_decision(data, verbose=True)
+        except Exception as exc:
+            print(color("  （假设记录失败：%s）" % exc, "yellow"))
         self._write_report("decide", payload, data, results, usage)
         self.broker.record_equity(self._snapshot())
         return data
@@ -767,6 +772,17 @@ class AITrader:
         stats = self.broker.stats()
         today = datetime.now().strftime("%Y-%m-%d")
         today_trades = [t for t in self.broker.state["trades"] if t["ts"].startswith(today)]
+        # 先回填我过去判断的结果，让复盘对着事实而不是对着记忆
+        try:
+            hypothesis.backfill(verbose=verbose)
+            judgment_rows = hypothesis.brief_for_review(8)
+            card = hypothesis.scorecard()
+        except Exception as exc:                       # noqa: BLE001
+            judgment_rows, card = [], {}
+            print(color("  （回填失败：%s）" % exc, "yellow"))
+        if verbose and judgment_rows:
+            print(color("  已带 %d 条「我的判断 vs 实际结果」进入复盘"
+                        % len(judgment_rows), "grey"))
         payload = {
             "task": "review",
             "date": today,
@@ -781,6 +797,8 @@ class AITrader:
                                      for a in (d.get("actions") or [])]}
                         for d in memory.decision_history(2)][-6:],
             "今日日记": memory.recent_journal(1, 1200),
+            "我过去的判断与真实结果(务必据此改规则，别凭印象)": judgment_rows,
+            "我的判断记分卡": card,
             "我的现用手册": memory.read_playbook()[:2500],
             "要求": {
                 "输出JSON": {
@@ -789,7 +807,10 @@ class AITrader:
                 },
                 "标准": ["必须指出至少一个自己的问题（哪怕是仓位偏小机会成本）",
                        "教训必须能在下次开盘时被机械执行",
-                       "禁止写正确的废话"],
+                       "禁止写正确的废话",
+                       "若「我过去的判断与真实结果」里出现未命中的判断，教训必须点名"
+                       "是哪一条、错在哪个前提（方向错/时机错/失效条件设错）",
+                       "样本不足 5 条的分组不许当规律用，只能标记为『观察中』"],
             },
         }
         user = json.dumps(payload, ensure_ascii=False)

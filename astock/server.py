@@ -26,8 +26,8 @@ from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import (ai_agent, altdata, backup, feed, holdings, mailer, market, memory,
-               monitor, paper, report, screener)
+from . import (ai_agent, altdata, backup, feed, holdings, hypothesis, mailer,
+               market, memory, monitor, paper, report, screener)
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -786,6 +786,17 @@ def _holdings_advice():
         return []
 
 
+def api_hypotheses(_q):
+    """判断记分卡：AI 过往判断的命中率与平均收益。"""
+    try:
+        hypothesis.backfill()
+    except Exception:
+        pass
+    card = hypothesis.scorecard()
+    card["recent"] = hypothesis.recent(12)
+    return card
+
+
 def api_real_trades(_q):
     """实盘成交流水 + 由流水推导的持仓 + 真实绩效（胜率/盈亏比）。"""
     return holdings.trades_overview()
@@ -1126,6 +1137,7 @@ GET_ROUTES = {
     "/api/holdings": api_holdings,
     "/api/holdings_advice": api_holdings_advice,
     "/api/real_trades": api_real_trades,
+    "/api/hypotheses": api_hypotheses,
     "/api/mail": api_mail_get,
     "/api/lhb": api_lhb,
     "/api/report_archive": api_report_archive,
