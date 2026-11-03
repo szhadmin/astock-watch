@@ -1062,6 +1062,29 @@ class Handler(BaseHTTPRequestHandler):
                                "trace": traceback.format_exc()[-800:]}, 500)
 
 
+def _port_in_use(host, port):
+    """探测端口上是否已有服务在响应（Windows 下 allow_reuse_address 会导致静默共存）。"""
+    import socket
+    target = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.8)
+    try:
+        if s.connect_ex((target, port)) == 0:
+            try:                                  # 看它是不是本项目的服务
+                s2 = socket.create_connection((target, port), timeout=0.8)
+                s2.sendall(b"GET /api/jobs HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+                data = s2.recv(200).decode("utf-8", "replace")
+                s2.close()
+                return True, "astock-watch" if "\"items\"" in data or "200" in data else "其他服务"
+            except Exception:
+                return True, "未知服务"
+    except Exception:
+        pass
+    finally:
+        s.close()
+    return False, ""
+
+
 def serve(host="127.0.0.1", port=8770, scheduler=True, open_browser=False):
     global SCHEDULER
     install_log_router()
@@ -1071,6 +1094,19 @@ def serve(host="127.0.0.1", port=8770, scheduler=True, open_browser=False):
     except Exception:
         pass
     os.makedirs(REPORT_DIR, exist_ok=True)
+    busy, who = _port_in_use(host, port)
+    if busy:
+        print("")
+        print("!" * 66)
+        print("  端口 %d 已被占用（%s）——很可能是一个**旧的 astock-watch 还在跑**。" % (port, who))
+        print("  Windows 下两个进程可以静默共用端口，新代码不会生效，页面就会报接口 404。")
+        print("")
+        print("  请先关掉旧的服务窗口，或执行：")
+        print("      netstat -ano | findstr :%d        # 查 PID" % port)
+        print("      taskkill /PID <上面的PID> /F      # 结束它")
+        print("  然后重新启动；也可以直接换端口：python main.py serve --port 8780")
+        print("!" * 66)
+        raise SystemExit(3)
     try:
         httpd = ThreadingHTTPServer((host, port), Handler)
     except OSError as exc:

@@ -18,7 +18,13 @@ const App = (() => {
 
   async function api(path, opts) {
     const r = await fetch(path, opts || {});
-    const j = await r.json().catch(() => ({ error: '解析失败' }));
+    let j = null;
+    try { j = await r.json(); } catch (e) {
+      throw new Error('返回的不是 JSON（HTTP ' + r.status + '）——后端可能没重启');
+    }
+    if (r.status === 404) {
+      throw new Error('接口不存在（404）：' + path + '\n后端还是旧版本，请关闭服务窗口后重新启动');
+    }
     if (j && j.error) throw new Error(j.error);
     return j;
   }
@@ -911,7 +917,7 @@ const App = (() => {
           <td class="l dim" style="font-size:12px">${esc(i.read)}</td></tr>`).join('')}
         </tbody></table>`;
     } catch (e) {
-      box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>';
+      box.innerHTML = '<div class="dim">读取失败：' + esc(e.message).replace(/\n/g, '<br>') + '</div>';
     }
   }
 
