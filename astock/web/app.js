@@ -81,16 +81,11 @@ const App = (() => {
     </svg>`;
   }
 
-  /* ---------------- 页面：仪表盘 ---------------- */
-  async function viewDashboard() {
-    const [ov, eq] = await Promise.all([api('/api/overview'), api('/api/equity')]);
-    S.ov = ov; renderHeader(ov);
-    const st = ov.stats || {}, rs = ov.rails || {};
-    const pos = ov.positions || [];
-    const idx = ov.indices || [];
-    const v = $('view');
-    v.innerHTML = `
-      <div class="grid g3">
+  /* ---------------- 页面：仪表盘（局部刷新，不闪） ---------------- */
+  /* ---------------- 页面：仪表盘（局部刷新，不闪） ---------------- */
+  function kpiCardsHtml(ov) {
+    const st = ov.stats || {};
+    return `
         <div class="card"><h3>总权益</h3>
           <div class="big ${cls(ov.account.total_return_pct)}">${money(ov.account.equity)}</div>
           <div class="${cls(ov.account.total_return_pct)}">${pct(ov.account.total_return_pct)} · 本金 ${money(ov.account.capital)}</div></div>
@@ -100,67 +95,133 @@ const App = (() => {
         <div class="card"><h3>模型消耗</h3>
           <div class="big">${ov.usage.calls || 0} <span class="dim" style="font-size:13px">次调用</span></div>
           <div class="dim">输入 ${ov.usage.prompt_tokens || 0} / 输出 ${ov.usage.completion_tokens || 0} tokens</div></div>
-        <div class="card"><h3>大盘环境</h3>
-          <div class="row" style="gap:16px">${idx.map(i =>
-      `<div><div class="dim" style="font-size:12px">${esc(i.name)}</div>
-         <div class="mono ${cls(i.pct)}">${n2(i.price)} <span style="font-size:12px">${pct(i.pct)}</span></div></div>`).join('') || '<span class="dim">暂无</span>'}</div></div>
-      </div>
+        <div class="card" id="market-card"><h3>大盘温度 ${ov._tempTag || ''}</h3>
+          <div id="market-card-body">${marketHtml(S.market)}</div></div>`;
+  }
 
-      <div class="grid g2" style="margin-top:14px">
-        <div class="card"><h3>权益曲线</h3>${chart(eq.equity)}</div>
-        <div class="card"><h3>当前持仓</h3>
-          ${pos.length ? `<table><thead><tr><th>标的</th><th>股数</th><th>成本</th><th>现价</th><th>浮盈</th><th>止损</th><th>目标</th></tr></thead><tbody>
-            ${pos.map(p => `<tr title="点击查看K线与AI买卖点" style="cursor:pointer" onclick="App.openKline('${p.code}')"><td class="l">${esc(p.name || '')} <span class="dim mono">${p.code}</span></td>
-              <td>${p.shares}</td><td>${n2(p.cost, 3)}</td><td>${n2(p.price)}</td>
-              <td class="${cls(p.pnl_pct)}">${pct(p.pnl_pct)}</td>
-              <td class="mono">${p.stop || '--'}</td><td class="mono">${p.target || '--'}</td></tr>`).join('')}
-            </tbody></table>` : '<div class="dim">空仓中。AI 可以选择空仓，空仓也是一种决策。</div>'}
-        </div>
-      </div>
+  function marketHtml(m) {
+    if (!m || m.error) return '<div class="dim">大盘数据获取中…</div>';
+    const t = m.temp || {}, g = m.gate || {};
+    const color = t.temp >= 60 ? 'up' : (t.temp < 40 ? 'down' : 'dim');
+    const bars = (m.sectors || []).slice(0, 5).map(s =>
+      `<span class="tag" title="主力净流入 ${n2(s.main_in_wan, 0)} 万｜涨${s.up}/跌${s.down}｜领涨 ${esc(s.leader || '')}">
+         ${esc(s.name)} <span class="${cls(s.pct)}">${s.pct > 0 ? '+' : ''}${n2(s.pct)}%</span></span>`).join('');
+    return `
+      <div class="row"><span class="mono ${color}" style="font-size:26px;font-weight:600">${t.temp ?? '--'}</span>
+        <span class="tag ${t.temp >= 60 ? 'hot' : (t.temp < 40 ? 'warn' : '')}">${esc(t.level || '')}</span>
+        <span class="dim" style="font-size:12px">${esc(g.note || '')}</span></div>
+      <div class="dim" style="font-size:12px;margin-top:6px">
+        指数 ${n2((t.detail || {})['指数平均涨跌%'])}% ｜ 上涨占比 ${n2((t.detail || {})['上涨家数占比%'], 1)}%
+        ｜ 涨停/跌停 ${esc((t.detail || {})['涨停/跌停'] || '-')} ｜ ${esc((t.detail || {})['上证趋势'] || '')}</div>
+      <div class="row" style="margin-top:8px">${bars || '<span class="dim">板块数据不可用</span>'}</div>`;
+  }
 
+  function positionsHtml(ov) {
+    const pos = ov.positions || [];
+    if (!pos.length) return '<div class="dim">空仓中。AI 可以选择空仓，空仓也是一种决策。</div>';
+    return `<table><thead><tr><th>标的</th><th>股数</th><th>成本</th><th>现价</th><th>浮盈</th><th>止损</th><th>目标</th></tr></thead><tbody>
+      ${pos.map(p => `<tr title="点击查看K线与AI买卖点" style="cursor:pointer" onclick="App.openKline('${p.code}')">
+        <td class="l">${esc(p.name || '')} <span class="dim mono">${p.code}</span></td>
+        <td>${p.shares}</td><td>${n2(p.cost, 3)}</td><td>${n2(p.price)}</td>
+        <td class="${cls(p.pnl_pct)}">${pct(p.pnl_pct)}</td>
+        <td class="mono">${p.stop || '--'}</td><td class="mono">${p.target || '--'}</td></tr>`).join('')}
+      </tbody></table>`;
+  }
+
+  function watchHtml(ov) {
+    const w = ov.watch || [];
+    if (!w.length) return '<div class="dim">观察池为空 —— 到「选股池」页让 AI 选股。</div>';
+    return `<table><thead><tr><th>标的</th><th>现价</th><th>涨跌</th></tr></thead><tbody>
+      ${w.map(x => `<tr title="点击查看K线" style="cursor:pointer" onclick="App.openKline('${x.code}')">
+        <td class="l">${esc(x.name || '')} <span class="dim mono">${x.code}</span></td>
+        <td>${n2(x.price)}</td><td class="${cls(x.pct)}">${pct(x.pct)}</td></tr>`).join('')}
+      </tbody></table>`;
+  }
+
+  function plansHtml(ov) {
+    const plans = ov.plans || [];
+    if (!plans.length) return '<div class="dim">无待执行计划单。收盘后的决策会存为计划单、次日开盘才成交（避免用收盘价事后偷价）。</div>';
+    return `<table><thead><tr><th>标的</th><th>方向</th><th>股数</th><th>信号价</th><th>止损</th><th>信号时间</th></tr></thead><tbody>
+      ${plans.map(p => `<tr title="点击查看K线" style="cursor:pointer" onclick="App.openKline('${p.code}')">
+        <td class="l">${esc(p.name || '')} <span class="dim mono">${p.code}</span></td>
+        <td class="${p.action === 'BUY' ? 'up' : 'down'}">${p.action === 'BUY' ? '买入' : '卖出'}</td>
+        <td>${p.shares}</td><td>${n2(p.signal_price, 3)}</td>
+        <td class="mono">${p.stop || '--'}</td>
+        <td class="dim mono" style="font-size:12px">${esc(p.signal_time || '')}</td></tr>`).join('')}
+      </tbody></table>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" onclick="App.run('execute')">立即尝试执行</button>
+        <span class="dim" style="font-size:12px">高开 &gt;1.5% 或跳空跌破止损则自动取消</span></div>`;
+  }
+
+  function railsHtml(ov) {
+    const rs = ov.rails || {};
+    return `<div class="dim" style="margin-bottom:8px">${esc(ov.rails_desc)}</div>
+      <div class="row">
+        <span class="tag">单股 ≤${rs.max_position_pct}%</span>
+        <span class="tag">总仓 ≤${rs.max_total_position_pct}%</span>
+        <span class="tag">每日 ≤${rs.max_trades_per_day} 笔</span>
+        <span class="tag">单笔风险 ≤${rs.max_risk_per_trade_pct}%</span>
+        <span class="tag warn">组合风险 ≤${rs.max_total_risk_pct || 2}%</span>
+        <span class="tag warn">当日亏 ${rs.daily_loss_limit_pct}% 停手</span>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" onclick="App.run('decide')">立即决策</button>
+        <button class="btn" onclick="App.run('pick')">AI 选股</button>
+        <button class="btn" onclick="App.run('review')">收盘复盘</button>
+        <button class="btn" onclick="App.refreshDashboard()">刷新数据</button>
+      </div>
+      <div class="dim" style="margin-top:8px;font-size:12px">
+        调度：${ov.schedule.enabled ? '开启' : '关闭'}｜盘中每 ${ov.schedule.decide_every_min} 分钟决策
+        ｜${ov.schedule.pick_at} 选股｜${ov.schedule.review_at} 复盘</div>`;
+  }
+
+  async function loadDashboardData() {
+    const [ov, eq, mkt] = await Promise.all([
+      api('/api/overview'),
+      api('/api/equity').catch(() => ({ equity: [] })),
+      api('/api/market').catch(() => null),
+    ]);
+    S.market = mkt;
+    return { ov, eq, mkt };
+  }
+
+  async function viewDashboard() {
+    const { ov, eq } = await loadDashboardData();
+    S.ov = ov;
+    renderHeader(ov);
+    $('view').innerHTML = `
+      <div class="grid g3" id="kpi-cards">${kpiCardsHtml(ov)}</div>
       <div class="grid g2" style="margin-top:14px">
-        <div class="card"><h3>AI 观察池</h3>
-          ${(ov.watch || []).length ? `<table><thead><tr><th>标的</th><th>现价</th><th>涨跌</th></tr></thead><tbody>
-            ${ov.watch.map(w => `<tr title="点击查看K线" style="cursor:pointer" onclick="App.openKline('${w.code}')"><td class="l">${esc(w.name || '')} <span class="dim mono">${w.code}</span></td>
-              <td>${n2(w.price)}</td><td class="${cls(w.pct)}">${pct(w.pct)}</td></tr>`).join('')}
-            </tbody></table>` : '<div class="dim">观察池为空 —— 到「选股池」页让 AI 选股。</div>'}
-        </div>
+        <div class="card"><h3>权益曲线</h3><div id="kpi-equity">${chart(eq.equity)}</div></div>
+        <div class="card"><h3>当前持仓</h3><div id="pos-card-body">${positionsHtml(ov)}</div></div>
+      </div>
+      <div class="grid g2" style="margin-top:14px">
+        <div class="card"><h3>AI 观察池</h3><div id="watch-card-body">${watchHtml(ov)}</div></div>
         <div class="card"><h3>待执行计划单 <span class="dim" style="font-weight:400">（收盘后决策 → 次日开盘执行）</span></h3>
-          ${(ov.plans || []).length ? `<table><thead><tr><th>标的</th><th>方向</th><th>股数</th>
-            <th>信号价</th><th>止损</th><th>信号时间</th></tr></thead><tbody>
-            ${ov.plans.map(p => `<tr title="点击查看K线" style="cursor:pointer" onclick="App.openKline('${p.code}')"><td class="l">${esc(p.name || '')} <span class="dim mono">${p.code}</span></td>
-              <td class="${p.action === 'BUY' ? 'up' : 'down'}">${p.action === 'BUY' ? '买入' : '卖出'}</td>
-              <td>${p.shares}</td><td>${n2(p.signal_price, 3)}</td>
-              <td class="mono">${p.stop || '--'}</td>
-              <td class="dim mono" style="font-size:12px">${esc(p.signal_time || '')}</td></tr>`).join('')}
-            </tbody></table>
-            <div class="row" style="margin-top:10px">
-              <button class="btn primary" onclick="App.run('execute')">立即尝试执行</button>
-              <span class="dim" style="font-size:12px">高开 &gt;1.5% 或跳空跌破止损则自动取消</span>
-            </div>`
-      : '<div class="dim">无待执行计划单。收盘后的决策会存为计划单、次日开盘才成交（避免用收盘价事后偷价）。</div>'}
-        </div>
-        <div class="card"><h3>硬风控红线（AI 不可越过）</h3>
-          <div class="dim" style="margin-bottom:8px">${esc(ov.rails_desc)}</div>
-          <div class="row">
-            <span class="tag">单股 ≤${rs.max_position_pct}%</span>
-            <span class="tag">总仓 ≤${rs.max_total_position_pct}%</span>
-            <span class="tag">每日 ≤${rs.max_trades_per_day} 笔</span>
-            <span class="tag">单笔风险 ≤${rs.max_risk_per_trade_pct}%</span>
-            <span class="tag warn">组合风险 ≤${rs.max_total_risk_pct || 2}%</span>
-            <span class="tag warn">当日亏 ${rs.daily_loss_limit_pct}% 停手</span>
-            <span class="tag">只买 ${rs.min_price}~${rs.max_price} 元</span>
-          </div>
-          <div class="row" style="margin-top:12px">
-            <button class="btn primary" onclick="App.run('decide')">立即决策</button>
-            <button class="btn" onclick="App.run('pick')">AI 选股</button>
-            <button class="btn" onclick="App.run('review')">收盘复盘</button>
-          </div>
-          <div class="dim" style="margin-top:8px;font-size:12px">
-            调度：${ov.schedule.enabled ? '开启' : '关闭'}｜盘中每 ${ov.schedule.decide_every_min} 分钟决策｜${ov.schedule.pick_at} 选股｜${ov.schedule.review_at} 复盘
-          </div>
-        </div>
-      </div>`;
+          <div id="plans-card-body">${plansHtml(ov)}</div></div>
+      </div>
+      <div class="card" style="margin-top:14px"><h3>硬风控红线（AI 不可越过）</h3>
+        <div id="rails-card-body">${railsHtml(ov)}</div></div>`;
+  }
+
+  /* 只更新数字与表格，不重建整页 → 无闪烁、保留滚动位置 */
+  async function refreshDashboard() {
+    if (S.tab !== 'dashboard') return;
+    let data;
+    try { data = await loadDashboardData(); } catch (e) { return; }
+    const { ov, eq } = data;
+    S.ov = ov;
+    renderHeader(ov);
+    const setHtml = (id, html) => { const el = $(id); if (el) el.innerHTML = html; };
+    setHtml('kpi-cards', kpiCardsHtml(ov));
+    setHtml('kpi-equity', chart(eq.equity));
+    setHtml('pos-card-body', positionsHtml(ov));
+    setHtml('watch-card-body', watchHtml(ov));
+    setHtml('plans-card-body', plansHtml(ov));
+    setHtml('rails-card-body', railsHtml(ov));
+    const flash = $('view');
+    if (flash) { flash.classList.add('soft-updated'); setTimeout(() => flash.classList.remove('soft-updated'), 400); }
   }
 
   /* ---------------- 页面：K 线复盘（分时 / 多周期 / 十字光标 / 点击详情） ---------------- */
@@ -942,6 +1003,23 @@ const App = (() => {
         </div>
       </div>
 
+      <div class="card" style="margin-top:14px"><h3>扩展数据源（可选：财报 / 股东 / 龙虎榜）</h3>
+        <div id="altdata-body" class="dim">检查中…</div>
+        <div class="dim" style="margin-top:8px;font-size:12px">
+          安装后自动启用并带 6 小时缓存：<code>pip install akshare</code>（免费）或 <code>pip install tushare</code>
+          （需在 config.json → ai.tushare_token 填 token）。不装也能跑，AI 只是少一份参考资料。
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:14px"><h3>数据备份（账户 / 成交 / AI 记忆）</h3>
+        <div id="backup-body" class="dim">加载中…</div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn primary" onclick="App.doBackup()">立即备份</button>
+          <button class="btn" onclick="App.loadBackups()">刷新列表</button>
+          <span class="dim" style="font-size:12px">备份含 paper_state（账户与成交）、playbook（手册）、journal（日记）、lessons（教训）、plans（计划单）</span>
+        </div>
+      </div>
+
       <div class="card" style="margin-top:14px"><h3>手动操作</h3>
         <div class="row">
           <button class="btn" onclick="App.run('scan')">全市场扫描</button>
@@ -956,6 +1034,8 @@ const App = (() => {
         </div>
       </div>`;
     S.style = null;
+    loadBackups();
+    loadAltdata();
   }
 
   async function saveConfig(railsOnly) {
@@ -1057,7 +1137,7 @@ const App = (() => {
         S._refreshed[j.id] = true;
         toast(j.status === 'done' ? (j.id + ' 完成') : (j.id + ' 失败，看日志'),
           j.status !== 'done');
-        setTimeout(() => route(S.tab, true), 900);
+        setTimeout(() => (S.tab === 'dashboard' ? refreshDashboard() : route(S.tab, true)), 900);
       }
     } catch (e) { /* 忽略单次失败 */ }
   }
@@ -1091,6 +1171,57 @@ const App = (() => {
     catch (e) { toast('失败：' + e.message, true); }
   }
 
+  /* ---------------- 扩展数据源状态 ---------------- */
+  async function loadAltdata() {
+    const box = $('altdata-body');
+    if (!box) return;
+    try {
+      const r = await api('/api/altstatus');
+      const tags = ['akshare', 'tushare'].map(k =>
+        `<span class="tag ${r[k] ? 'ok' : ''}">${k} ${r[k] ? '已安装' : '未安装'}</span>`).join('');
+      box.innerHTML = `<div class="row">${tags}</div>
+        <div class="dim" style="font-size:12px;margin-top:6px">${esc(r.note || '')}</div>`;
+    } catch (e) { box.innerHTML = '<div class="dim">状态获取失败</div>'; }
+  }
+
+  /* ---------------- 数据备份 ---------------- */
+  async function loadBackups() {
+    const box = $('backup-body');
+    if (!box) return;
+    try {
+      const b = await api('/api/backups');
+      const items = (b.items || []).filter(x => x.exists);
+      const missing = (b.items || []).filter(x => !x.exists);
+      const list = (b.backups || []).map(x => `<div class="item" onclick="App.doRestore('${esc(x.name)}')">
+          <div class="row"><span class="mono" style="font-size:12px">${esc(x.name)}</span>
+          <span class="spacer"></span><span class="meta">${(x.size / 1024 / 1024).toFixed(2)} MB · ${esc(x.mtime)}</span></div>
+        </div>`).join('');
+      box.innerHTML = `<div class="row" style="margin-bottom:8px">
+          <span class="tag ok">核心数据 ${items.length} 项齐全</span>
+          ${missing.length ? `<span class="tag warn">${missing.length} 项待生成</span>` : ''}
+          <span class="tag">备份 ${b.backup_count || 0} 份</span></div>
+        <div class="list" style="max-height:200px">${list || '<div class="dim">还没有备份，点「立即备份」</div>'}</div>
+        <div class="dim" style="font-size:12px;margin-top:6px">点备份条目可恢复到该时间点（恢复前会自动先备份当前数据）。</div>`;
+    } catch (e) { box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>'; }
+  }
+
+  async function doBackup() {
+    try {
+      const r = await post('/api/backup', { reason: 'web' });
+      toast('已备份：' + r.file + (r.verified ? '（校验通过）' : ''));
+      loadBackups();
+    } catch (e) { toast('备份失败：' + e.message, true); }
+  }
+
+  async function doRestore(name) {
+    if (!confirm('恢复到这个备份？当前数据会先自动备份一份。\n' + name)) return;
+    try {
+      const r = await post('/api/restore', { name });
+      toast('已恢复，准备刷新');
+      setTimeout(() => route(S.tab, true), 600);
+    } catch (e) { toast('恢复失败：' + e.message, true); }
+  }
+
   /* ---------------- 路由 ---------------- */
   const VIEWS = {
     dashboard: viewDashboard, kline: viewKline, decisions: viewDecisions,
@@ -1104,7 +1235,9 @@ const App = (() => {
     S.tab = tab;
     document.querySelectorAll('.tabs a').forEach(a =>
       a.classList.toggle('active', a.dataset.tab === tab));
-    $('view').innerHTML = '<div class="loading">加载中…</div>';
+    if (!force || !$('view').firstElementChild) {
+      $('view').innerHTML = '<div class="loading">加载中…</div>';
+    }
     try { await VIEWS[tab](); }
     catch (e) {
       $('view').innerHTML = `<div class="card"><h3>加载失败</h3><pre>${esc(e.message)}</pre>
@@ -1118,7 +1251,7 @@ const App = (() => {
     $('btn-refresh').onclick = () => route(S.tab, true);
     route();
     setInterval(() => {
-      if (S.tab === 'dashboard' && !S.job) route('dashboard', true);
+      if (S.tab === 'dashboard') refreshDashboard();
     }, 15000);
   }
   document.addEventListener('DOMContentLoaded', init);
@@ -1127,6 +1260,6 @@ const App = (() => {
     route, run, watchJob, closeJob, reset, saveConfig, saveSchedule, ping,
     showDecision, showPrompt, showReport, showJournal, showPb, showFailed,
     addWatch, saveWatch, openKline, selectJob, setKlinePeriod, setKlineDays,
-    toggleAuto, refreshKline, drawChart
+    toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore
   };
 })();

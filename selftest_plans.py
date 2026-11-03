@@ -12,9 +12,10 @@ BAK = STATE + ".bak"
 BAK_PLANS = PLANS + ".bak"
 yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-# 备份真实账户与真实计划单，测试结束后原样还原（不能弄丢用户/系统正在用的数据）
+# 备份真实账户与真实计划单，并把账户**移开**（否则真实持仓会占用组合风险预算，
+# 导致用例结果受真实仓位影响）；测试结束后原样还原，绝不弄丢数据。
 if os.path.exists(STATE):
-    shutil.copy(STATE, BAK)
+    shutil.move(STATE, BAK)
 if os.path.exists(PLANS):
     shutil.copy(PLANS, BAK_PLANS)
 
@@ -62,6 +63,8 @@ oks.append(run_case("高开超过 1.5%（应取消）", 6.72, expect="cancel"))
 oks.append(run_case("开盘即跌破止损（应取消）", 6.30, expect="cancel"))
 
 # 清理：恢复账户与计划单（有备份则还原，没有则删除测试残留）
+if os.path.exists(STATE):
+    os.remove(STATE)          # 删掉测试过程中产生的空账户
 if os.path.exists(BAK):
     shutil.move(BAK, STATE)
 if os.path.exists(BAK_PLANS):

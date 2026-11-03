@@ -26,7 +26,7 @@ from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import ai_agent, feed, memory, monitor, paper, screener
+from . import ai_agent, altdata, backup, feed, market, memory, monitor, paper, screener
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -267,6 +267,10 @@ def run_phase(params):
     else:
         raise ValueError("未知任务 %s" % kind)
     snap = trader._snapshot()
+    try:
+        backup.make_backup("phase-" + str(kind))   # 每轮决策/复盘后自动留档
+    except Exception:
+        pass
     return {"equity": snap["equity"], "cash": snap["cash"],
             "positions": len(snap["positions"]),
             "tokens": trader.llm.usage}
@@ -672,6 +676,55 @@ def api_jobs(_q):
             "account_busy": ACCOUNT_LOCK.locked()}
 
 
+def api_market(_q):
+    """大盘温度 + 行业板块强度 + 当前收紧策略（前端仪表盘用）。"""
+    try:
+        temp = market.market_temp()
+    except Exception as exc:                          # noqa: BLE001
+        return {"error": "大盘温度获取失败：%s" % exc}
+    try:
+        sectors = market.sector_board(8)
+    except Exception:
+        sectors = []
+    g = market.gate(temp)
+    return {"temp": temp, "gate": g,
+            "sectors": [{"name": s["name"], "pct": s["pct"],
+                         "main_in_wan": round(s["main_in"] / 1e4, 0),
+                         "up": s["up"], "down": s["down"],
+                         "leader": s["leader"]} for s in sectors]}
+
+
+def api_altstatus(_q):
+    """可选扩展数据源（akshare / tushare）安装状态。"""
+    return altdata.status()
+
+
+def api_backups(_q):
+    health = backup.data_health()
+    health["note"] = ("账户与成交、AI 手册、日记、教训、观察池、计划单都在 data/，"
+                      "已自动备份到 backups/")
+    return health
+
+
+def api_backup(body):
+    path = backup.make_backup(body.get("reason") or "web", verbose=True)
+    if not path:
+        return None, "备份失败（data/ 可能为空）"
+    ok, missing = backup.verify_backup(os.path.basename(path))
+    return {"ok": True, "file": os.path.basename(path), "verified": ok,
+            "missing": missing, "backups": backup.list_backups()[:10]}, None
+
+
+def api_restore(body):
+    if running_jobs():
+        return None, "有任务正在运行，先等它们结束再恢复"
+    name = (body.get("name") or "").strip()
+    if not name:
+        return None, "请指定备份文件名"
+    ok, msg = backup.restore_backup(name)
+    return ({"ok": True, "message": msg} if ok else None), (None if ok else msg)
+
+
 def api_reset(body):
     if running_jobs():
         return None, "有任务正在运行，请等它们结束后再重置"
@@ -838,6 +891,9 @@ GET_ROUTES = {
     "/api/trades": api_trades,
     "/api/kline": api_kline,
     "/api/config": api_config_get,
+    "/api/backups": api_backups,
+    "/api/market": api_market,
+    "/api/altstatus": api_altstatus,
     "/api/job": api_job,
     "/api/jobs": api_jobs,
 }
@@ -847,6 +903,8 @@ POST_ROUTES = {
     "/api/config": api_config_set,
     "/api/run": api_run,
     "/api/reset": api_reset,
+    "/api/backup": api_backup,
+    "/api/restore": api_restore,
 }
 
 
@@ -935,6 +993,10 @@ def serve(host="127.0.0.1", port=8770, scheduler=True, open_browser=False):
     global SCHEDULER
     install_log_router()
     memory.ensure_dirs()
+    try:
+        backup.make_backup("server-start")
+    except Exception:
+        pass
     os.makedirs(REPORT_DIR, exist_ok=True)
     try:
         httpd = ThreadingHTTPServer((host, port), Handler)

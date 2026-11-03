@@ -155,3 +155,7 @@ pre{background:#080d16;border:1px solid var(--line);border-radius:8px;padding:12
 .k-tip .kt{color:#e8c46a;font-weight:600;margin-bottom:3px;font-family:var(--mono)}
 .k-tip b{font-family:var(--mono)}
 #k-periods .btn.primary{background:#8f2f2f;border-color:#b13b3b}
+
+/* 局部刷新过渡：数据更新时轻微高亮，避免整页闪烁 */
+#view{transition:opacity .18s ease}
+#view.soft-updated{opacity:.86}

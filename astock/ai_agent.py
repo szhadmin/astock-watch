@@ -20,7 +20,8 @@ import re
 import time
 from datetime import datetime
 
-from . import feed, indicators as ind, llm as llm_mod, memory, monitor, notify, paper, screener as scr
+from . import (altdata, feed, indicators as ind, llm as llm_mod, market, memory,
+               monitor, notify, paper, screener as scr)
 from .notify import color
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -110,7 +111,7 @@ class RiskRails:
                    c["daily_loss_limit_pct"], c["min_price"], c["max_price"],
                    c["price_band_pct"]))
 
-    def check(self, order, snap, quote, day_state):
+    def check(self, order, snap, quote, day_state, cap_override=None):
         """返回 (ok, reason, shares)。order 为 AI 给出的原始指令。"""
         c = self.cfg
         code = order.get("code")
@@ -145,12 +146,14 @@ class RiskRails:
             shares = int(shares // c["lot"] * c["lot"])
             # 单股仓位上限
             cur_val = (pos["market_value"] if pos else 0.0)
-            max_val = self.capital * c["max_position_pct"] / 100
+            cap_pct = min(c["max_position_pct"],
+                          float(cap_override) if cap_override else 999)
+            max_val = self.capital * cap_pct / 100
             add_val = shares * px
             if cur_val + add_val > max_val + 1:
                 shares = int(((max_val - cur_val) / px) // c["lot"] * c["lot"])
                 if shares <= 0:
-                    return False, "已达单股仓位上限 %.0f%%" % c["max_position_pct"], 0
+                    return False, "已达单股仓位上限 %.0f%%（含大盘温度收紧）" % cap_pct, 0
             # 总仓位上限
             total_val = snap["market_value"]
             max_total = self.capital * c["max_total_position_pct"] / 100
@@ -411,6 +414,42 @@ class AITrader:
             except Exception:
                 continue
 
+        try:
+            temp_info = market.market_temp()
+            sector_rows = [{"板块": s["name"], "涨幅%": s["pct"],
+                            "主力净流入万": round(s["main_in"] / 1e4, 0)}
+                           for s in market.sector_board(8)]
+            gate_info = market.gate(temp_info)
+        except Exception as exc:                       # noqa: BLE001
+            temp_info, sector_rows, gate_info = None, [], None
+            print(color("  （大盘温度获取失败：%s，按常规风控）" % exc, "grey"))
+        # 持仓与观察池的所属板块（只用前几只，控制 token）
+        try:
+            for item in (positions[:3] + watch[:3]):
+                secs = market.stock_sectors(item.get("code") or "")
+                if secs:
+                    item["所属板块"] = "%s(%+.2f%%) / %s(%+.2f%%)" % (
+                        secs[0]["name"], secs[0]["pct"],
+                        secs[1]["name"] if len(secs) > 1 else "-",
+                        secs[1]["pct"] if len(secs) > 1 else 0)
+        except Exception:
+            pass
+        # 可选扩展数据：财报 / 股东 / 龙虎榜（未安装 akshare/tushare 时自动跳过）
+        try:
+            use_alt = bool((self.ai_cfg or {}).get("use_altdata", True))
+            token = (self.ai_cfg or {}).get("tushare_token", "")
+            for item in (positions[:3] + watch[:3]):
+                if not use_alt:
+                    break
+                c = item.get("code")
+                if not c:
+                    continue
+                txt = altdata.compact(c, token=token, use=use_alt)
+                if txt:
+                    item["基本面"] = txt
+        except Exception:
+            pass
+        day["gate"] = gate_info
         payload = {
             "task": "decide",
             "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -423,6 +462,9 @@ class AITrader:
             "硬性风控(不可违反)": self.rails.describe(),
             "我的策略手册": memory.read_playbook()[:2500],
             "最近教训": [x["lesson"] for x in memory.read_lessons(8)],
+            "大盘温度": temp_info,
+            "行业板块强度(涨幅前列)": sector_rows,
+            "风控收紧(代码已生效，不可违反)": gate_info,
             "待执行计划单(昨日收盘时定下，今日开盘按规则执行)": self._load_plans(),
             "持仓": positions,
             "观察池": watch,
@@ -490,7 +532,15 @@ class AITrader:
                     results.append("拒绝 %s：行情获取失败 %s" % (code, exc))
                     continue
             q = quote_cache[code]
-            ok, why, shares = self.rails.check(a, snap, q, day)
+            gate_info = day.get("gate") or {}
+            if act == "BUY" and gate_info and gate_info.get("allow_new") is False:
+                msg = "拒绝买入 %s：%s" % (code, gate_info.get("note", "大盘弱势，禁止开新仓"))
+                print(color("  ✘ " + msg, "green"))
+                results.append(msg)
+                continue
+            ok, why, shares = self.rails.check(
+                a, snap, q, day,
+                cap_override=(gate_info or {}).get("max_position_pct"))
             name = q.get("name") or ""
             if not ok:
                 msg = "拒绝 %s %s：%s" % (code, act, why)

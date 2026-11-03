@@ -5,6 +5,7 @@ config.*.json
 
 # 运行数据：账户、成交、AI 决策/日记/手册、日志、快照
 data/
+backups/
 
 # Python
 __pycache__/

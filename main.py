@@ -36,7 +36,8 @@ try:                                     # Windows 控制台中文
 except Exception:
     pass
 
-from astock import analyze, monitor, notify, signals, store  # noqa: E402
+from astock import (analyze, backup, chart_svg, monitor, notify, signals,
+                    store)  # noqa: E402
 from astock.notify import color  # noqa: E402
 
 CONFIG_PATH = os.path.join(BASE, "config.json")
@@ -114,9 +115,32 @@ def cmd_daily(args, cfg):
             continue
         brief.append(r)
         sections.append(analyze.render_markdown(r))
+    # 顺带画 K 线图（纯 SVG，无需任何第三方库）
+    svg_blocks = []
+    if not getattr(args, "no_svg", False):
+        for r in brief:
+            try:
+                p = chart_svg.save_svg(r["code"], r.get("name") or "",
+                                       path=os.path.join(BASE, "data", "reports",
+                                                         "%s_kline.svg" % r["code"]))
+                with open(p, encoding="utf-8") as f:
+                    svg = f.read()
+                svg_blocks.append('<div class="chart">%s</div>' % svg)
+                sections.append("\n![%s K线](%s_kline.svg)\n" % (r["code"], r["code"]))
+            except Exception as exc:                   # noqa: BLE001
+                print(color("  [%s] 画图失败：%s" % (r["code"], exc), "yellow"))
     head = ("# 收盘报告 %s\n\n数据源：东方财富公开接口｜生成：%s\n\n"
             % (datetime.now().strftime("%Y-%m-%d"), datetime.now().strftime("%H:%M:%S")))
     path = store.write_report_md(head + "\n".join(sections))
+    if svg_blocks:
+        html = ("<!doctype html><meta charset='utf-8'><title>收盘报告 %s</title>"
+                "<style>body{background:#0b0f16;color:#dfe7f3;font-family:system-ui;margin:24px}"
+                ".chart{margin:18px 0;background:#0b0f16}</style>%s"
+                % (datetime.now().strftime("%Y-%m-%d"), "".join(svg_blocks)))
+        hp = path.replace(".md", ".html")
+        with open(hp, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(color("  图表报告：%s" % hp, "grey"))
     notify.banner("收盘报告已生成  %s" % datetime.now().strftime("%Y-%m-%d %H:%M"))
     print(analyze.render_brief(brief))
     print("")
@@ -358,6 +382,7 @@ def cmd_ai(args, cfg):
         cmd_ai_doctor(cfg)
         return
     if args.reset:
+        backup.make_backup("before-reset", verbose=True)   # 重置前先留档
         ai_dir = os.path.join(BASE, "data", "ai")
         state = os.path.join(ai_dir, "paper_state.json")
         if os.path.exists(state):
@@ -416,6 +441,44 @@ def cmd_ai(args, cfg):
 
 
 # --------------------------------------------------------------------------- #
+# 数据备份 / 恢复 / 体检
+# --------------------------------------------------------------------------- #
+def _fmt_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return "%.1f %s" % (n, unit)
+        n /= 1024.0
+    return "%.1f TB" % n
+
+
+def cmd_backup(args, cfg=None):
+    if args.restore:
+        ok, msg = backup.restore_backup(args.restore, verbose=True)
+        print(("✔ " if ok else "✘ ") + msg)
+        return
+    if args.list:
+        health = backup.data_health()
+        notify.banner("数据体检  %s" % datetime.now().strftime("%Y-%m-%d %H:%M"))
+        for it in health["items"]:
+            flag = "✔" if it["exists"] else "·"
+            detail = ("%d 个文件" % it["files"]) if it["kind"] == "dir" else \
+                (_fmt_size(it.get("size", 0)) if it["exists"] else "-")
+            print("  %s %-28s %-10s %s" % (flag, it["path"], detail, it["mtime"]))
+        print("")
+        print("  已有备份 %d 份（最近 10 份）：" % health["backup_count"])
+        for b in health["backups"]:
+            print("    %-48s %-9s %s" % (b["name"], _fmt_size(b["size"]), b["mtime"]))
+        return
+    path = backup.make_backup(args.reason or "manual", verbose=True)
+    if not path:
+        print("✘ 备份失败（data/ 可能为空）")
+        return
+    ok, missing = backup.verify_backup(os.path.basename(path), verbose=True)
+    print("✔ 备份完成：%s" % path)
+    print("  校验：%s" % ("核心数据齐全" if ok else "⚠ 缺少 %s" % missing))
+
+
+# --------------------------------------------------------------------------- #
 # Web 服务
 # --------------------------------------------------------------------------- #
 def cmd_serve(args, cfg):
@@ -444,8 +507,9 @@ def main():
     pm.add_argument("--once", action="store_true", help="只跑一轮")
     pm.set_defaults(func=cmd_monitor)
 
-    pd = sub.add_parser("daily", help="生成收盘报告")
+    pd = sub.add_parser("daily", help="生成收盘报告（含 SVG K 线图）")
     pd.add_argument("codes", nargs="*")
+    pd.add_argument("--no-svg", action="store_true", help="不生成 K 线图")
     pd.set_defaults(func=cmd_daily)
 
     pt = sub.add_parser("test", help="数据源自检")
@@ -473,6 +537,12 @@ def main():
     pai.add_argument("--doctor", action="store_true",
                      help="一键体检：网关/JSON/围栏/截断/双调用/风控")
     pai.set_defaults(func=cmd_ai)
+
+    pk = sub.add_parser("backup", help="备份 / 恢复 / 体检 AI 数据（账户、记忆、成交）")
+    pk.add_argument("--list", action="store_true", help="查看数据体检与已有备份")
+    pk.add_argument("--reason", help="备份原因备注")
+    pk.add_argument("--restore", metavar="ZIP", help="从指定备份恢复")
+    pk.set_defaults(func=cmd_backup)
 
     ps = sub.add_parser("serve", help="启动 Web 控制台（浏览器操作 AI 操盘系统）")
     ps.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机）")

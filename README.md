@@ -276,6 +276,70 @@ python main.py daily
 
 ---
 
+## 11. 数据安全与备份（账户与记忆永不丢失）
+
+你的**账户与成交**（`data/ai/paper_state.json`）、**AI 记忆**（`playbook.md` 手册、`journal/` 日记、
+`lessons.json` 教训、`watchlist.json` 观察池、`plans/` 计划单）都在 `data/` 下，**永远不会被自动清空**。
+
+三种保护机制：
+
+| 机制 | 说明 |
+|---|---|
+| **自动备份** | 服务启动时、每轮 AI 决策/复盘后、重置模拟盘之前，自动打包 `data/` → `backups/astock-data-<时间>-<原因>.zip`（保留最近 30 份） |
+| **手动备份 / 恢复** | `python main.py backup --list` 体检；`python main.py backup` 立即备份；`python main.py backup --restore <zip>` 回滚（回滚前会自动先备份当前数据） |
+| **Web 一键操作** | 设置页「数据备份」卡片：立即备份、查看列表、点条目回滚 |
+
+```bash
+python main.py backup --list          # 数据体检 + 已有备份列表
+python main.py backup --reason 里程碑   # 打一个带备注的备份
+python main.py backup --restore backups/astock-data-20261103-104257-server-start.zip
+```
+
+> `backups/` 与 `data/` 都在 `.gitignore` 里：**备份含账户信息，不会进入 git 仓库**。
+
+---
+
+## 12. 扩展：大盘温度 / 板块强度 / 报告图表 / 可选基本面
+
+### 12.1 大盘温度闸门（弱势自动收紧）
+
+`astock/market.py` 用四个客观维度合成 0~100 的「大盘温度」：指数涨跌、涨跌家数广度、
+涨停/跌停家数、上证相对 MA5/MA20 的趋势。温度直接翻译成**代码级**收紧策略：
+
+| 温度 | 等级 | 代码行为 |
+|---|---|---|
+| < 30 | 冰点 | **禁止开新仓**（只管理现有持仓） |
+| 30~44 | 偏冷 | 允许开仓，但单股上限压到 25% |
+| 45~59 | 中性 | 常规风控（35%） |
+| ≥ 60 | 偏热/过热 | 按原上限，但提示追高风险 |
+
+温度与「行业板块涨幅前列」「个股所属板块」都会进入 AI 的决策上下文，但**收紧动作由代码执行，
+不看模型脸色**。网页仪表盘有实时温度卡片，接口：`GET /api/market`。
+
+### 12.2 报告里的 K 线图（纯 SVG）
+
+`astock/chart_svg.py` 用**手绘 SVG** 生成 K 线图（蜡烛 + 成交量 + 四条均线 + AI 买卖点标记），
+零依赖、可直接在浏览器/GitHub 预览：
+
+```bash
+python main.py daily                  # 生成 data/reports/daily-*.md + *.html（内嵌 SVG）+ <code>_kline.svg
+python main.py daily --no-svg         # 只要文字报告
+```
+
+### 12.3 可选基本面：财报 / 股东 / 龙虎榜
+
+`astock/altdata.py` 是**可选**适配层，装了就自动启用，没装系统照常跑（AI 只是少一份参考资料）：
+
+```bash
+pip install akshare       # 免费、免 token，推荐
+pip install tushare       # 需在 config.json → ai.use_altdata 与 ai.tushare_token 配置
+```
+
+取到的数据带 6 小时缓存（`data/altdata/<code>.json`），进提示词前会压成 3~6 行摘要，
+不会把整张财报塞给模型。安装状态见网页「设置 → 扩展数据源」，接口：`GET /api/altstatus`。
+
+---
+
 ## 10. 开源与许可
 
 - **License**：MIT（见 [LICENSE](LICENSE)）；另附投资风险提示，使用前请阅读。

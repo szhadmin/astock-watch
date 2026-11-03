@@ -264,3 +264,73 @@ def get_indices() -> list:
         except (TypeError, ValueError):
             continue
     return out
+
+
+# --------------------------------------------------------------------------- #
+# 指数 / 板块（大盘温度、板块强度用）
+# --------------------------------------------------------------------------- #
+def get_kline_secid(sid: str, klt: int = 101, limit: int = 60, adjust: int = 0) -> list:
+    """按 secid 直接取 K 线（用于指数：1.000001 上证、0.399001 深成等）。"""
+    url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
+           "?secid=%s&fields1=f1,f2,f3,f4,f5,f6&fields2=%s"
+           "&klt=%d&fqt=%d&end=20500101&lmt=%d"
+           % (sid, _KLINE_FIELDS2, klt, adjust, limit))
+    data = json.loads(_get(url)).get("data") or {}
+    out = []
+    for line in data.get("klines") or []:
+        q = line.split(",")
+        if len(q) < 11:
+            continue
+        out.append({"date": q[0], "open": float(q[1]), "close": float(q[2]),
+                    "high": float(q[3]), "low": float(q[4]), "vol": float(q[5]),
+                    "amount": float(q[6]), "pct": float(q[8])})
+    return out
+
+
+def get_index_kline(secid: str = "1.000001", limit: int = 60) -> list:
+    """上证指数日线（默认）。"""
+    return get_kline_secid(secid, 101, limit)
+
+
+def get_sector_board(size: int = 40) -> list:
+    """行业板块排行：返回 [{code,name,pct,main_in,leader,up,down}]"""
+    url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=%d&po=1&np=1"
+           "&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields="
+           "f2,f3,f12,f14,f62,f104,f105,f128" % size)
+    data = json.loads(_get(url)).get("data") or {}
+    diff = data.get("diff") or []
+    if isinstance(diff, dict):
+        diff = list(diff.values())
+    out = []
+    for d in diff:
+        try:
+            out.append({
+                "code": str(d.get("f12")), "name": d.get("f14"),
+                "pct": float(d.get("f3") or 0),
+                "main_in": float(d.get("f62") or 0),
+                "up": int(d.get("f104") or 0), "down": int(d.get("f105") or 0),
+                "leader": d.get("f128") or "",
+            })
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def get_stock_sectors(code: str, size: int = 12) -> list:
+    """个股所属板块（行业/概念/地域）及其当日涨跌。"""
+    url = ("https://push2.eastmoney.com/api/qt/slist/get?spt=3&fltt=2&invt=2"
+           "&fields=f12,f13,f14,f3,f62&secid=%s&pn=1&pz=%d&po=1&np=1"
+           % (secid(code), size))
+    data = json.loads(_get(url)).get("data") or {}
+    diff = data.get("diff") or []
+    if isinstance(diff, dict):
+        diff = list(diff.values())
+    out = []
+    for d in diff:
+        try:
+            out.append({"code": str(d.get("f12")), "name": d.get("f14"),
+                        "pct": float(d.get("f3") or 0),
+                        "main_in": float(d.get("f62") or 0)})
+        except (TypeError, ValueError):
+            continue
+    return out
