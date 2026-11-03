@@ -113,6 +113,25 @@ def state_stats(rows):
     return out
 
 
+def regime_stats(rows):
+    """按市场状态细分（牛/熊/窄幅缩量/宽幅剧震/常规震荡）分桶。"""
+    keys = ["牛市", "熊市", "窄幅缩量", "宽幅剧震", "常规震荡"]
+    out = []
+    for k in keys:
+        sel = [r for r in rows if (r["ctx"].get("regime") == k)]
+        if not sel:
+            continue
+        exc = [(r["result"].get("excess")
+                if r["result"].get("excess") is not None else r["result"].get("end_ret") or 0)
+               for r in sel]
+        hits = sum(1 for r in sel if r["result"].get("hit"))
+        out.append({"状态细分": k, "n": len(sel),
+                    "超额%": round(sum(exc) / len(exc), 2),
+                    "扣费后超额%": round(sum(exc) / len(exc) - COST, 2),
+                    "命中率%": round(hits / len(sel) * 100, 1)})
+    return out
+
+
 def feature_stats(rows):
     """新特征分层：评分变化率 / 量能倍数 / 距MA20偏离。"""
     feats = [("score_chg", "评分变化率", [(-999, -5), (-5, 0), (0, 5), (5, 999)]),
@@ -159,7 +178,12 @@ def main():
               % (x["期限"], x["n"], x["原始%"], x["超额%"], x["扣费后超额%"]))
     print()
 
-    print("④ 分市场状态（当时指数 20 日涨跌）")
+    print("④ 市场状态细分（震荡市再拆三层）")
+    for x in regime_stats(rows):
+        print("   %-10s n=%-6d 超额%+6.2f%% 扣费后超额%+6.2f%% 命中%5.1f%%"
+              % (x["状态细分"], x["n"], x["超额%"], x["扣费后超额%"], x["命中率%"]))
+    print()
+    print("④b 分市场状态（当时指数 20 日涨跌）")
     for x in state_stats(rows):
         print("   %-18s n=%-6d 超额%+6.2f%% 扣费后超额%+6.2f%% 命中%5.1f%%"
               % (x["状态"], x["n"], x["超额%"], x["扣费后超额%"], x["命中率%"]))

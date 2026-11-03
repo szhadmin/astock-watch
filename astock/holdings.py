@@ -17,7 +17,7 @@ import os
 import time
 from datetime import datetime
 
-from . import feed, signals
+from . import feed, signals, sizing
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PATH = os.path.join(BASE, "data", "holdings.json")
@@ -113,6 +113,27 @@ def analyze(cfg=None, verbose=False, use_cache=True):
         pnl = (price - it["cost"]) * it["shares"]
         pnl_pct = (price / it["cost"] - 1) * 100 if it["cost"] else 0
         advice, tone = _advise(rep, pnl_pct)
+        # 连续加权：该股按信号强度"应该"占多少仓位（与模拟盘同一套尺度）
+        try:
+            cap = sizing.cap_pct(rep["scores"]["total"], None, None, 40.0)
+            suggest_mv = float(d.get("capital") or 0) * cap / 100
+            em = "超配" if mv > suggest_mv * 1.25 else ("低配" if mv < suggest_mv * 0.75 else "合适")
+            if suggest_mv > 0:
+                ratio = mv / suggest_mv
+                if em == "超配":
+                    sizing_txt = "超配（现占 %.0f%%，建议≤%.0f%%，约砍 %.0f%%）" % (
+                        mv / float(d.get("capital") or 1) * 100, cap,
+                        (1 - 1 / ratio) * 100)
+                elif em == "低配":
+                    sizing_txt = "低配（现占 %.0f%%，可加至 %.0f%%）" % (
+                        mv / float(d.get("capital") or 1) * 100, cap)
+                else:
+                    sizing_txt = "仓位合适（%.0f%%，上限 %.0f%%）" % (
+                        mv / float(d.get("capital") or 1) * 100, cap)
+            else:
+                sizing_txt = "-"
+        except Exception:
+            cap, sizing_txt = None, "-"
         lv = rep["levels"]
         rows.append({
             "code": code, "name": rep.get("name") or it.get("name") or "",
@@ -127,6 +148,7 @@ def analyze(cfg=None, verbose=False, use_cache=True):
             "support": lv.get("support") or [], "resistance": lv.get("resistance") or [],
             "dist_stop_pct": round((price / lv["stop"] - 1) * 100, 2) if lv.get("stop") else None,
             "advice": advice, "tone": tone,
+            "suggest_cap_pct": cap, "sizing": sizing_txt,
             "date": it.get("date"), "note": it.get("note"), "ok": True,
         })
         total_cost += it["cost"] * it["shares"]

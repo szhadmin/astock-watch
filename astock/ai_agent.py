@@ -503,6 +503,9 @@ class AITrader:
                     item["基本面"] = txt
         except Exception:
             pass
+        def _hold_cap(code):
+            sc, chg = self._score_now(code)
+            return sizing.cap_pct(sc, chg, None, 40.0)
         # 我的真实持仓（只读参考，AI 的模拟盘照旧独立运作）
         my_holds = []
         try:
@@ -519,6 +522,9 @@ class AITrader:
                     "现价": px,
                     "浮动盈亏%": round((px / h["cost"] - 1) * 100, 2) if px and h["cost"] else None,
                     "买入日期": h.get("date") or "", "备注": h.get("note") or "",
+                    "建议单股上限%": sizing.cap_pct(
+                        (self._score_now(h["code"]) or [None, None])[0],
+                        (self._score_now(h["code"]) or [None, None])[1], None, 40.0),
                 })
             if my_holds:
                 print(color("  我的持仓 %d 只已并入决策参考" % len(my_holds), "grey"))

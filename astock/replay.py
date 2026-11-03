@@ -22,7 +22,7 @@ import time
 import uuid
 from datetime import datetime
 
-from . import feed, indicators as ind, strategy
+from . import feed, indicators as ind, regime as regime_mod, strategy
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PATH = os.path.join(BASE, "data", "ai", "hypotheses_replay.jsonl")
@@ -67,7 +67,7 @@ def hist_temp_map(index_bars=None, limit=400):
 # 单只股票回放
 # --------------------------------------------------------------------------- #
 def replay_code(code, bars, temp_map=None, min_score=60, max_score_bear=40,
-                verbose=False, idx_map=None, horizons=(5, 10, 20)):
+                verbose=False, idx_map=None, horizons=(5, 10, 20), regime_map=None):
     """回放一只股票的历史判断。
 
     相比早期版本，这里额外采集三类"新特征"与多持有期收益：
@@ -79,6 +79,7 @@ def replay_code(code, bars, temp_map=None, min_score=60, max_score_bear=40,
     """
     temp_map = temp_map or {}
     idx_map = idx_map or {}
+    regime_map = regime_map or {}
     out = []
     n = len(bars)
     if n < 100:
@@ -175,7 +176,10 @@ def replay_code(code, bars, temp_map=None, min_score=60, max_score_bear=40,
             "ctx": {"temp": temp_map.get(bars[i]["date"]), "temp_est": True,
                     "sector_pct": None, "score": score,
                     "score_chg": score_chg, "vol_ratio": vol_ratio,
-                    "ma20_dev": ma20_dev, "idx20": idx20},
+                    "ma20_dev": ma20_dev, "idx20": idx20,
+                    "regime": (regime_map.get(bars[i]["date"]) or {}).get("sub"),
+                    "amp20": (regime_map.get(bars[i]["date"]) or {}).get("amp20"),
+                    "vol20": (regime_map.get(bars[i]["date"]) or {}).get("vol20")},
             "status": "closed",
             "result": {"filled_at": datetime.now().strftime("%Y-%m-%d"),
                        "days": 5, "end_ret": end5,
@@ -251,6 +255,11 @@ def run(codes=None, days=250, max_codes=30, verbose=True, cfg=None):
         codes = _default_universe(max_codes, cfg)
     codes = [c for c in codes][:max_codes]
     temp_map = hist_temp_map()
+    regime_map = {}
+    try:
+        regime_map = regime_mod.hist_map(limit=max(1000, days + 300))
+    except Exception:
+        regime_map = {}
     idx_map = {}
     try:
         ibars = feed.get_index_kline("1.000001", max(1000, days + 260))
@@ -287,7 +296,8 @@ def run(codes=None, days=250, max_codes=30, verbose=True, cfg=None):
         if not bars:
             continue
         time.sleep(0.15)                             # 礼貌间隔
-        recs, st = replay_code(code, bars, temp_map, verbose=verbose, idx_map=idx_map)
+        recs, st = replay_code(code, bars, temp_map, verbose=verbose,
+                               idx_map=idx_map, regime_map=regime_map)
         recs = [r for r in recs if ("replay", r["code"], r["date"]) not in keys]
         all_recs.extend(recs)
         stats.append(st)

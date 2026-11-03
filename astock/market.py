@@ -152,6 +152,15 @@ def gate(temp_info=None):
         return {"mode": "tight", "allow_new": True, "max_position_pct": 25.0,
                 "note": "大盘温度 %d（%s）：收紧开仓，单股上限降至 25%%" % (temp, t["level"])}
     if temp < 60:
+        try:
+            from . import regime as _rg
+            pol = _rg.policy()
+            if pol.get("sub") in ("窄幅缩量", "宽幅剧震"):
+                return {"mode": "range-" + pol["sub"], "allow_new": True,
+                        "max_position_pct": pol["max_position_pct"],
+                        "min_score": pol["min_score"], "note": pol["note"]}
+        except Exception:
+            pass
         if state == "震荡":
             return {"mode": "range", "allow_new": True, "max_position_pct": 28.0,
                     "min_score": 65,
