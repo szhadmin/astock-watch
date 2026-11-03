@@ -2196,7 +2196,8 @@ const App = (() => {
       if (S.tab === 'dashboard') refreshDashboard();
     }, 15000);
   }
-  document.addEventListener('DOMContentLoaded', init);
+  try { initStockPicker(); } catch (e) { console.warn(e); }
+    document.addEventListener('DOMContentLoaded', init);
 
   return {
     route, run, watchJob, closeJob, reset, saveConfig, saveSchedule, ping,
