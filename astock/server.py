@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import (ai_agent, altdata, backup, feed, holdings, hypothesis, mailer,
-               market, memory, monitor, paper, report, screener)
+               market, memory, monitor, paper, report, rules, screener)
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -786,6 +786,22 @@ def _holdings_advice():
         return []
 
 
+def api_rules(_q):
+    """经验规则库：生效/候选/淘汰 + 升格门槛。"""
+    try:
+        rules.link_from_hypotheses()
+    except Exception:
+        pass
+    s = rules.summary()
+    s["prompt_view"] = rules.active_for_prompt()
+    return s
+
+
+def api_rules_lesson_check(body):
+    """手动检查一条教训是否可证伪（前端"体检"用）。"""
+    return rules.check_verifiable((body or {}).get("text") or "")
+
+
 def api_hypotheses(_q):
     """判断记分卡：AI 过往判断的命中率与平均收益。"""
     try:
@@ -1138,6 +1154,7 @@ GET_ROUTES = {
     "/api/holdings_advice": api_holdings_advice,
     "/api/real_trades": api_real_trades,
     "/api/hypotheses": api_hypotheses,
+    "/api/rules": api_rules,
     "/api/mail": api_mail_get,
     "/api/lhb": api_lhb,
     "/api/report_archive": api_report_archive,
@@ -1155,6 +1172,7 @@ POST_ROUTES = {
     "/api/real_trades": api_real_trades_add,
     "/api/real_trades/delete": api_real_trades_del,
     "/api/real_trades/rebuild": api_real_trades_rebuild,
+    "/api/rules/check": api_rules_lesson_check,
     "/api/mail": api_mail_save,
     "/api/mail/test": api_mail_test,
     "/api/restore": api_restore,

@@ -22,7 +22,7 @@ from datetime import datetime
 
 from . import (altdata, feed, holdings, hypothesis, indicators as ind,
                llm as llm_mod, mailer, market, memory, monitor, notify, paper,
-               screener as scr)
+               rules as rules_mod, screener as scr)
 from .notify import color
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -57,6 +57,22 @@ DEFAULT_EXEC = {
     "defer_outside_session": True,   # 非交易时段只生成计划单，不用收盘价事后成交
     "cancel_if_gap_pct": 1.5,        # 次日高开超过该幅度则取消买入计划
 }
+
+def _active_rules():
+    """给决策用的生效规则（只包含通过统计验证的）。"""
+    try:
+        view = rules_mod.active_for_prompt(1200)
+        return {"规则": view["text"], "生效条数": view["active"]}
+    except Exception:
+        return {"规则": "（规则库不可用，按基础纪律执行）"}
+
+
+def _pending_rule_count():
+    try:
+        return rules_mod.active_for_prompt()["pending"]
+    except Exception:
+        return 0
+
 
 SYSTEM_STRATEGIST = """你是一位在 A 股市场用真金白银交易的操盘手，风格务实、重视赔率与纪律。你的判断必须建立在给定数据（K线、指标、资金）之上，禁止编造成交量、价格或消息。
 你必须严格遵守系统给出的硬性风控约束；任何越界指令都会被系统拒绝并记录为失误。
@@ -496,7 +512,8 @@ class AITrader:
                     "今日是否触发亏损熔断": day["loss_limit_hit"]},
             "硬性风控(不可违反)": self.rails.describe(),
             "我的策略手册": memory.read_playbook()[:2500],
-            "最近教训": [x["lesson"] for x in memory.read_lessons(8)],
+            "我的生效规则(经统计验证，权重最高)": _active_rules(),
+            "候选规则(样本不足，仅供参考、不许当依据)": _pending_rule_count(),
             "大盘温度": temp_info,
             "行业板块强度(涨幅前列)": sector_rows,
             "风控收紧(代码已生效，不可违反)": gate_info,
@@ -808,6 +825,8 @@ class AITrader:
                 "标准": ["必须指出至少一个自己的问题（哪怕是仓位偏小机会成本）",
                        "教训必须能在下次开盘时被机械执行",
                        "禁止写正确的废话",
+                       "每条教训必须写成『当/若 + 可量化条件 + 具体动作』，"
+                       "例：当大盘温度<30 时不追高开>2% 的票；写不出阈值的会被系统丢弃",
                        "若「我过去的判断与真实结果」里出现未命中的判断，教训必须点名"
                        "是哪一条、错在哪个前提（方向错/时机错/失效条件设错）",
                        "样本不足 5 条的分组不许当规律用，只能标记为『观察中』"],
@@ -833,7 +852,21 @@ class AITrader:
         print(color("  自我批评：%s" % (data.get("critique") or ""), "yellow"))
         for i, l in enumerate(data.get("lessons") or [], 1):
             print("   教训%d：%s" % (i, l))
-        memory.add_lessons(data.get("lessons") or [])
+        lessons = data.get("lessons") or []
+        memory.add_lessons(lessons)
+        try:                                     # 教训 → 可证伪规则（不可检验的直接丢弃）
+            res = rules_mod.upsert_from_lessons(lessons, source="review:" + today)
+            up = rules_mod.link_from_hypotheses(verbose=False)
+            if verbose:
+                print(color("  规则库：新增 %d / 合并 %d / 丢弃不可证伪 %d%s"
+                            % (len(res["added"]), len(res["merged"]),
+                               len(res["rejected"]),
+                               ("｜状态更新 %d 条" % len(up["changed"])) if up["changed"] else ""),
+                            "grey"))
+                for x in res["rejected"][:3]:
+                    print(color("    ✘ 丢弃：%s（%s）" % (x["text"][:38], x["reason"]), "yellow"))
+        except Exception as exc:                 # noqa: BLE001
+            print(color("  （规则库更新失败：%s）" % exc, "yellow"))
 
         # 第二次调用：单独写手册（纯 Markdown，不塞 JSON，避免转义/截断）
         pb = None

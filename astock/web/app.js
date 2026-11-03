@@ -1295,6 +1295,49 @@ const App = (() => {
     return tips.length ? tips.join('；') : '结构正常：无破止损、无满仓，按各自区间操作。';
   }
 
+  /* ---------------- 页面：经验规则库（AI 的交易经验） ---------------- */
+  async function viewRules() {
+    const v = $('view');
+    v.innerHTML = `<div class="card"><h3>经验规则库</h3>
+      <div class="dim" style="font-size:12px">AI 每次复盘写的"教训"会先过可证伪性体检：没有数字阈值的直接丢弃；
+      有样本与统计支撑（样本≥20、覆盖≥10 只股票、命中率≥55%、扣费后净期望≥0.3%）才能升格为「生效」并进入决策提示词。</div>
+      <div id="rules-box" style="margin-top:12px"><div class="dim">加载中…</div></div></div>`;
+    loadRules();
+  }
+
+  async function loadRules() {
+    const box = $('rules-box');
+    if (!box) return;
+    try {
+      const d = await api('/api/rules');
+      const th = d.thresholds || {};
+      const head = `<div class="row" style="margin-bottom:8px">
+          <span class="tag">共 ${d.total} 条</span>
+          <span class="tag ok">生效 ${(d.counts || {})['生效'] || 0}</span>
+          <span class="tag">候选 ${(d.counts || {})['候选'] || 0}</span>
+          <span class="tag warn">淘汰 ${(d.counts || {})['淘汰'] || 0}</span>
+          <span class="spacer"></span>
+          <span class="dim" style="font-size:12px">门槛：样本≥${th['样本数≥']}、覆盖≥${th['覆盖股票≥']}只、
+            命中率≥${th['命中率≥']}%、净期望≥${th['净期望≥']}%（成本 ${th['成本假设%']}%）</span>
+        </div>`;
+      const table = (arr, tone) => arr.length ? `<table><thead><tr>
+          <th>规则（条件 + 动作）</th><th>类别</th><th>样本</th><th>命中率</th><th>净期望</th><th>最近验证</th></tr></thead><tbody>
+          ${arr.map(r => `<tr>
+            <td class="l">${esc(r['条件'])}</td>
+            <td class="dim">${esc(r['类别'])}</td>
+            <td>${r['样本数'] || 0}</td>
+            <td class="${(r['命中率'] || 0) >= 55 ? 'up' : 'dim'}">${r['命中率'] === null ? '--' : n2(r['命中率'], 1) + '%'}</td>
+            <td class="${(r['净期望%'] || 0) > 0 ? 'up' : 'down'}">${r['净期望%'] === null ? '--' : n2(r['净期望%'], 2) + '%'}</td>
+            <td class="dim mono" style="font-size:11px">${esc(r['最近验证'] || '未验证')}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="dim">暂无</div>';
+      box.innerHTML = head
+        + `<h3 style="margin-top:10px">生效规则（会进入 AI 决策提示词）</h3>${table(d['生效'] || [])}`
+        + `<h3 style="margin-top:14px">候选规则（观察中，不进提示词）</h3>${table(d['候选'] || [])}`
+        + `<div class="dim" style="margin-top:8px;font-size:12px">
+             提示词里当前写给 AI 的规则：<code>${esc(((d.prompt_view || {}).text || '').slice(0, 300))}</code></div>`;
+    } catch (e) { box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>'; }
+  }
+
   /* ---------------- 页面：龙虎榜（全市场） ---------------- */
   async function viewLhb() {
     const st = S.lhb || (S.lhb = { days: 30, code: '' });
@@ -1458,7 +1501,7 @@ const App = (() => {
       <div class="card hidden" id="doc-view" style="margin-top:14px"><h3 id="doc-title"></h3><pre id="doc-body"></pre></div>`;
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
     go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
-    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings();
+    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules();
   }
 
   async function loadArchive() {
@@ -1810,7 +1853,7 @@ const App = (() => {
   const VIEWS = {
     dashboard: viewDashboard, kline: viewKline, decisions: viewDecisions,
     pool: viewPool, holdings: viewHoldings, lhb: viewLhb, review: viewReview,
-    style: viewStyle, settings: viewSettings
+    style: viewStyle, rules: viewRules, settings: viewSettings
   };
   async function route(tab, force) {
     tab = tab || (location.hash || '#dashboard').slice(1);
@@ -1848,6 +1891,6 @@ const App = (() => {
     toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore,
     loadArchive, loadLhb, loadStockAlt, saveHoldings, addHoldRow, delHoldRow,
     go, loadMail, saveMail, testMail, renderHoldAdvice, loadMyHoldDashboard,
-    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings
+    loadRealTrades, addRealTrade, delRealTrade, syncTradesToHoldings, loadRules
   };
 })();

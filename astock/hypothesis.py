@@ -81,6 +81,13 @@ def record_from_decision(data, cfg=None, verbose=False):
     if not data:
         return []
     today = datetime.now().strftime("%Y-%m-%d")
+    # 决策当时的市场上下文（规则统计要按条件切片）
+    ctx_base = {}
+    try:
+        from . import market as _mk
+        ctx_base["temp"] = (_mk.market_temp() or {}).get("temp")
+    except Exception:
+        ctx_base["temp"] = None
     existing = load_all()
     open_keys = {(x["date"], x["code"]) for x in existing if x.get("status") == "open"}
     out = []
@@ -97,8 +104,15 @@ def record_from_decision(data, cfg=None, verbose=False):
             "target": round(float(target), 4) if target else None,
             "horizon": HORIZON, "move_pct": MOVE_PCT,
             "reason": (reason or "")[:200],
+            "ctx": dict(ctx_base),
             "status": "open", "result": None,
         }
+        try:                                    # 所属板块当日涨幅
+            from . import market as _mk
+            info = _mk.sector_of(code) or {}
+            rec["ctx"]["sector_pct"] = info.get("pct")
+        except Exception:
+            rec["ctx"]["sector_pct"] = None
         out.append(rec)
 
     quotes = {}

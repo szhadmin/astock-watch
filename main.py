@@ -411,6 +411,35 @@ def cmd_ai(args, cfg):
 
 
 # --------------------------------------------------------------------------- #
+# 经验规则库
+# --------------------------------------------------------------------------- #
+def cmd_rules(args, cfg=None):
+    from astock import memory, rules
+    if args.migrate:
+        notify.banner("教训 → 规则库（可证伪性体检）")
+        res = rules.migrate_lessons(memory.read_lessons(60), verbose=True)
+        print("\n  现在运行：python main.py rules  查看规则库")
+        return
+    notify.banner("经验规则库  %s" % datetime.now().strftime("%Y-%m-%d %H:%M"))
+    up = rules.link_from_hypotheses(verbose=True)
+    s = rules.summary()
+    print("  版本 v%s｜更新 %s｜共 %d 条" % (s["version"], s["updated"], s["total"]))
+    print("  升格门槛：样本≥%d、覆盖股票≥%d、命中率≥%s%%、扣费后净期望≥%s%%（成本假设 %s%%）"
+          % (s["thresholds"]["样本数≥"], s["thresholds"]["覆盖股票≥"],
+             s["thresholds"]["命中率≥"], s["thresholds"]["净期望≥"],
+             s["thresholds"]["成本假设%"]))
+    for st in ("生效", "候选", "淘汰"):
+        print("\n  【%s】%d 条" % (st, len(s[st])))
+        for r in s[st][:15]:
+            print("    %s｜样本%s 命中%s%% 净期望%s%%｜%s"
+                  % (r["id"], r["样本数"], r.get("命中率"), r.get("净期望%"), r["条件"][:56]))
+    view = rules.active_for_prompt()
+    print("\n  进入决策提示词的规则（%d 条生效 / %d 条候选不进）：" % (view["active"], view["pending"]))
+    print("    " + view["text"].replace("\n", "\n    "))
+    print("\n  已结算判断样本：%d 条" % up["closed"])
+
+
+# --------------------------------------------------------------------------- #
 # 数据备份 / 恢复 / 体检
 # --------------------------------------------------------------------------- #
 def _fmt_size(n):
@@ -507,6 +536,10 @@ def main():
     pai.add_argument("--doctor", action="store_true",
                      help="一键体检：网关/JSON/围栏/截断/双调用/风控")
     pai.set_defaults(func=cmd_ai)
+
+    pr = sub.add_parser("rules", help="经验规则库：查看/体检/统计升格")
+    pr.add_argument("--migrate", action="store_true", help="把现有教训做可证伪性体检并入库")
+    pr.set_defaults(func=cmd_rules)
 
     pk = sub.add_parser("backup", help="备份 / 恢复 / 体检 AI 数据（账户、记忆、成交）")
     pk.add_argument("--list", action="store_true", help="查看数据体检与已有备份")
