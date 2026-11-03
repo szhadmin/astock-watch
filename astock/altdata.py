@@ -285,6 +285,38 @@ def ingest(codes, token="", force=True, verbose=True):
     return out
 
 
+def lhb_recent(days=30, limit=80, code=None, min_net_wan=None):
+    """全市场龙虎榜明细（近 days 天，按上榜日倒序）。code 可过滤单只股票。"""
+    ak = _try_import("akshare")
+    if not ak:
+        return None, "未安装 akshare：pip install akshare"
+    df = _lhb_df(ak, days)
+    if df is None or df.empty:
+        return None, "龙虎榜数据获取失败（可能非交易日或接口限频）"
+    try:
+        d = df.copy()
+        d["代码"] = d["代码"].astype(str).str.zfill(6)
+        if code:
+            d = d[d["代码"] == str(code).zfill(6)]
+        d["_net"] = d["龙虎榜净买额"].astype(float) / 1e4      # 万元
+        if min_net_wan is not None:
+            d = d[d["_net"] >= float(min_net_wan)]
+        d = d.sort_values(["上榜日", "_net"], ascending=[False, False]).head(limit)
+        rows = []
+        for _, r in d.iterrows():
+            rows.append({"date": str(r.get("上榜日")), "code": r["代码"],
+                         "name": str(r.get("名称") or ""),
+                         "pct": round(float(r.get("涨跌幅") or 0), 2),
+                         "net_wan": round(float(r.get("_net") or 0), 1),
+                         "buy_wan": round(float(r.get("龙虎榜买入额") or 0) / 1e4, 1),
+                         "sell_wan": round(float(r.get("龙虎榜卖出额") or 0) / 1e4, 1),
+                         "reason": str(r.get("上榜原因") or "")[:40],
+                         "read": str(r.get("解读") or "")})
+        return rows, None
+    except Exception as exc:                          # noqa: BLE001
+        return None, "解析失败：%s" % exc
+
+
 if __name__ == "__main__":
     import sys
     print(json.dumps(status(), ensure_ascii=False))

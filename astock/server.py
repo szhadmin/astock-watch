@@ -713,6 +713,38 @@ def api_report_archive(_q):
     return {"items": report.archive_list(30)}
 
 
+def api_altdata(q):
+    """单只股票的扩展数据：财报 / 股东户数 / 龙虎榜。"""
+    code = (q.get("code") or [""])[0].strip()
+    if not code or not code.isdigit():
+        return {"error": "请提供 6 位股票代码"}
+    cfg = load_config()
+    ai = cfg.get("ai") or {}
+    use = bool(ai.get("use_altdata", True))
+    force = (q.get("force") or [""])[0] in ("1", "true")
+    data = altdata.brief(code, token=ai.get("tushare_token", ""), use=use, force=force)
+    st = altdata.status()
+    if not data:
+        return {"code": code, "available": False, "status": st,
+                "hint": st.get("note")}
+    data["available"] = True
+    data["status"] = st
+    data["compact"] = altdata.compact(code, token=ai.get("tushare_token", ""), use=use)
+    return data
+
+
+def api_lhb(q):
+    """全市场龙虎榜（近 N 日）。"""
+    days = int((q.get("days") or ["30"])[0])
+    limit = int((q.get("limit") or ["80"])[0])
+    code = (q.get("code") or [""])[0].strip() or None
+    rows, err = altdata.lhb_recent(days=days, limit=limit, code=code)
+    if rows is None:
+        return {"error": err, "items": []}
+    return {"items": rows, "days": days, "count": len(rows),
+            "status": altdata.status()}
+
+
 def api_altstatus(_q):
     """可选扩展数据源（akshare / tushare）安装状态。"""
     return altdata.status()
@@ -913,6 +945,8 @@ GET_ROUTES = {
     "/api/backups": api_backups,
     "/api/market": api_market,
     "/api/altstatus": api_altstatus,
+    "/api/altdata": api_altdata,
+    "/api/lhb": api_lhb,
     "/api/report_archive": api_report_archive,
     "/api/job": api_job,
     "/api/jobs": api_jobs,

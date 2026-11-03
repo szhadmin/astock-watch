@@ -635,8 +635,10 @@ const App = (() => {
       return;
     }
     st.data = k;
-    $('view').innerHTML = klineShell(ov, k) + klineChartCard(k) + klineDetailCard(k, st.sel) + klineTables(k);
+    $('view').innerHTML = klineShell(ov, k) + klineChartCard(k) + klineDetailCard(k, st.sel)
+      + klineTables(k) + altCardHtml();
     bindChart(k);
+    loadStockAlt(st.code);
     const totalPts = k.period === 'trend' ? (k.trend.times || []).length : (k.bars || []).length;
     if (st.sel !== null && st.sel < totalPts) {
       const box = $('kchart');
@@ -852,6 +854,113 @@ const App = (() => {
     viewPool();
   }
 
+  /* ---------------- 页面：龙虎榜（全市场） ---------------- */
+  async function viewLhb() {
+    const st = S.lhb || (S.lhb = { days: 30, code: '' });
+    const v = $('view');
+    v.innerHTML = `
+      <div class="card">
+        <div class="row"><h3 style="margin:0">龙虎榜</h3>
+          <span class="spacer"></span>
+          <select id="lhb-days" style="width:110px" onchange="App.loadLhb(this.value, document.getElementById('lhb-code').value)">
+            ${[7, 15, 30, 60].map(d => `<option value="${d}" ${d === st.days ? 'selected' : ''}>近 ${d} 日</option>`).join('')}
+          </select>
+          <input id="lhb-code" placeholder="可选：6位代码" value="${esc(st.code)}" style="width:130px"
+                 onkeydown="if(event.key==='Enter')App.loadLhb(document.getElementById('lhb-days').value, this.value)">
+          <button class="btn primary" onclick="App.loadLhb(document.getElementById('lhb-days').value, document.getElementById('lhb-code').value)">查询</button>
+        </div>
+        <div class="dim" style="margin-top:8px;font-size:12px">
+          数据源：东方财富龙虎榜（akshare）｜按上榜日倒序｜点任意一行可直接看该股 K 线与 AI 买卖点
+        </div>
+        <div id="lhb-body" style="margin-top:10px"><div class="dim">加载中…</div></div>
+      </div>`;
+    loadLhb(st.days, st.code);
+  }
+
+  async function loadLhb(days, code) {
+    const st = S.lhb || (S.lhb = { days: 30, code: '' });
+    st.days = parseInt(days || st.days, 10);
+    st.code = (code || '').trim();
+    const box = $('lhb-body');
+    if (!box) return;
+    box.innerHTML = '<div class="dim">加载中…（首次约 1~3 秒）</div>';
+    try {
+      const url = '/api/lhb?days=' + st.days + '&limit=120' + (st.code ? '&code=' + st.code : '');
+      const r = await api(url);
+      if (r.error) { box.innerHTML = '<div class="dim">' + esc(r.error) + '</div>'; return; }
+      const items = r.items || [];
+      if (!items.length) {
+        box.innerHTML = '<div class="dim">该区间没有龙虎榜记录' + (st.code ? '（' + esc(st.code) + '）' : '') + '</div>';
+        return;
+      }
+      const dates = Array.from(new Set(items.map(i => i.date)));
+      box.innerHTML = `<div class="row" style="margin-bottom:6px">
+          <span class="tag">${items.length} 条</span>
+          <span class="tag">上榜日 ${dates.length} 天</span>
+          <span class="tag">${esc(r.status && r.status.version || '')}</span></div>
+        <table><thead><tr><th>上榜日</th><th>标的</th><th>涨跌幅</th><th>净买额(万)</th>
+          <th>买入(万)</th><th>卖出(万)</th><th>上榜原因</th><th>解读</th></tr></thead><tbody>
+        ${items.map(i => `<tr title="点击查看K线" style="cursor:pointer" onclick="App.openKline('${i.code}')">
+          <td class="l mono" style="font-size:12px">${esc(i.date)}</td>
+          <td class="l">${esc(i.name)} <span class="dim mono">${i.code}</span></td>
+          <td class="${cls(i.pct)}">${i.pct > 0 ? '+' : ''}${n2(i.pct)}%</td>
+          <td class="${cls(i.net_wan)}">${n2(i.net_wan, 0)}</td>
+          <td class="dim">${n2(i.buy_wan, 0)}</td>
+          <td class="dim">${n2(i.sell_wan, 0)}</td>
+          <td class="l dim" style="font-size:12px">${esc(i.reason)}</td>
+          <td class="l dim" style="font-size:12px">${esc(i.read)}</td></tr>`).join('')}
+        </tbody></table>`;
+    } catch (e) {
+      box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  /* ---------------- 基本面卡（K线页用） ---------------- */
+  function altCardHtml() {
+    return `<div class="card" style="margin-top:14px"><h3>基本面 · 股东 · 龙虎榜</h3>
+      <div id="alt-body" class="dim">加载中…</div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn tiny" onclick="App.loadStockAlt(S.kline.code, true)">强制刷新</button>
+        <span class="dim" style="font-size:12px">数据来自 akshare，缓存 6 小时</span>
+      </div></div>`;
+  }
+
+  async function loadStockAlt(code, force) {
+    const box = $('alt-body');
+    if (!box) return;
+    try {
+      const r = await api('/api/altdata?code=' + encodeURIComponent(code) + (force ? '&force=1' : ''));
+      if (!r.available) {
+        box.innerHTML = `<div class="dim">${esc((r.status && r.status.note) || '扩展数据不可用')}</div>`;
+        return;
+      }
+      const fin = (r.financial || []).map(x =>
+        `<tr><td class="l">${esc(x['项'])}</td>${(x['期'] || []).map(p =>
+          `<td class="mono">${esc(p['值'])}<span class="dim" style="font-size:11px"> ${esc(p['报告期'])}</span></td>`).join('')}</tr>`).join('');
+      const hold = (r.holders || []).map(x =>
+        `<tr><td class="l mono">${esc(x['截止日'])}</td><td>${esc(x['股东户数'])}</td>
+         <td class="${cls(parseFloat(x['较上期%']))}">${esc(x['较上期%'])}%</td>
+         <td class="dim">${esc(x['户均持股市值万'])} 万</td></tr>`).join('');
+      const lhb = (r.lhb || []).map(x =>
+        `<tr><td class="l mono">${esc(x['日期'])}</td>
+         <td class="${cls(x['净买额万'])}">${n2(x['净买额万'], 1)} 万</td>
+         <td class="l dim" style="font-size:12px">${esc((x['解读'] || '') + ' ' + (x['上榜原因'] || ''))}</td></tr>`).join('');
+      box.innerHTML = `
+        <div class="grid g2">
+          <div><h3 style="margin:0 0 6px">财务摘要</h3>
+            ${fin ? `<table><tbody>${fin}</tbody></table>` : '<div class="dim">无数据</div>'}</div>
+          <div><h3 style="margin:0 0 6px">股东户数</h3>
+            ${hold ? `<table><thead><tr><th>截止日</th><th>户数</th><th>环比</th><th>户均市值</th></tr></thead><tbody>${hold}</tbody></table>` : '<div class="dim">无数据</div>'}</div>
+        </div>
+        <h3 style="margin:12px 0 6px">近 30 日龙虎榜</h3>
+        ${lhb ? `<table><thead><tr><th>日期</th><th>净买额</th><th>解读</th></tr></thead><tbody>${lhb}</tbody></table>`
+          : '<div class="dim">近 30 日未上榜</div>'}
+        <div class="dim" style="margin-top:8px;font-size:12px">${esc(r.compact || '')}</div>`;
+    } catch (e) {
+      box.innerHTML = '<div class="dim">读取失败：' + esc(e.message) + '</div>';
+    }
+  }
+
   /* ---------------- 页面：复盘 ---------------- */
   async function viewReview() {
     const [ov, eq, tr, jr, ls] = await Promise.all([
@@ -906,7 +1015,7 @@ const App = (() => {
         </div>
       </div>
       <div class="card hidden" id="doc-view" style="margin-top:14px"><h3 id="doc-title"></h3><pre id="doc-body"></pre></div>`;
-    loadArchive();
+    loadArchive, loadLhb, loadStockAlt();
   }
 
   async function loadArchive() {
@@ -1249,7 +1358,8 @@ const App = (() => {
   /* ---------------- 路由 ---------------- */
   const VIEWS = {
     dashboard: viewDashboard, kline: viewKline, decisions: viewDecisions,
-    pool: viewPool, review: viewReview, style: viewStyle, settings: viewSettings
+    pool: viewPool, lhb: viewLhb, review: viewReview, style: viewStyle,
+    settings: viewSettings
   };
   async function route(tab, force) {
     tab = tab || (location.hash || '#dashboard').slice(1);
@@ -1285,6 +1395,6 @@ const App = (() => {
     showDecision, showPrompt, showReport, showJournal, showPb, showFailed,
     addWatch, saveWatch, openKline, selectJob, setKlinePeriod, setKlineDays,
     toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore,
-    loadArchive
+    loadArchive, loadLhb, loadStockAlt
   };
 })();
