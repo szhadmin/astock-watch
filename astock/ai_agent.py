@@ -22,7 +22,8 @@ from datetime import datetime
 
 from . import (altdata, evolution, feed, holdings, hypothesis,
                indicators as ind, llm as llm_mod, mailer, market, memory,
-               monitor, notify, paper, rules as rules_mod, screener as scr)
+               monitor, notify, paper, rules as rules_mod, screener as scr,
+               sizing)
 from .notify import color
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -346,6 +347,20 @@ class AITrader:
         return {"大盘": [{"名称": i["name"], "点位": i["price"], "涨跌%": i["pct"]} for i in idx],
                 "时间": datetime.now().strftime("%Y-%m-%d %H:%M")}
 
+    def _score_now(self, code):
+        """当日综合评分与"5 日前的评分"，用于评分变化率（回放显示它比绝对值更有信息量）。"""
+        try:
+            from . import strategy as _st
+            bars = feed.get_kline(code, 101, limit=45)
+            if len(bars) < 30:
+                return None, None
+            now = _st.evaluate(bars, len(bars) - 1).get("score")
+            prev = _st.evaluate(bars, len(bars) - 6).get("score")
+            chg = round(now - prev, 1) if (now is not None and prev is not None) else None
+            return now, chg
+        except Exception:
+            return None, None
+
     def _index_close(self):
         """上证指数最新收盘（用于扣 beta 记账，失败返回 None）。"""
         try:
@@ -510,6 +525,27 @@ class AITrader:
         except Exception:
             my_holds = []
         day["gate"] = gate_info
+        # 连续加权：评分 + 评分变化 → 单股上限（替代"过/不过"的开关）
+        sizing_map = {}
+        try:
+            gate_cap = (gate_info or {}).get("max_position_pct")
+            rails_cap = float((self.rails.cfg or {}).get("max_position_pct") or 40)
+            for item in watch + positions:
+                code = item.get("code")
+                if not code:
+                    continue
+                sc, chg = self._score_now(code)
+                cap = sizing.cap_pct(sc, chg, gate_cap, rails_cap)
+                sizing_map[code] = cap
+                item["评分"] = sc
+                item["评分变化"] = chg
+                item["建议单股上限%"] = cap
+                item["仓位说明"] = sizing.explain(sc, chg)
+            if sizing_map and verbose:
+                print(color("  连续加权仓位：%d 只已按评分/变化率给出上限" % len(sizing_map), "grey"))
+        except Exception as exc:                       # noqa: BLE001
+            print(color("  （连续加权计算失败：%s）" % exc, "yellow"))
+        day["sizing"] = sizing_map
         day["force_plan"] = bool(force_plan)      # 收盘后复盘用：只出次日计划单，不成交
         payload = {
             "task": "decide",
@@ -528,6 +564,13 @@ class AITrader:
             "行业板块强度(涨幅前列)": sector_rows,
             "风控收紧(代码已生效，不可违反)": gate_info,
             "板块强度过滤规则": market.sector_rules(self.ai_cfg),
+            "仓位加权规则(代码已生效)": {
+                "说明": "单股上限 = min(大盘闸门, 风控上限) × 评分系数；"
+                        "评分0-40→0.5、40-50→0.7、60-70→0.9、70+→1.0~1.1；"
+                        "评分变化≥+5 再加 0.15，≤−5 减 0.20（回放验证：变化率比绝对值更有信息量）",
+                "你的活": "在「观察池/持仓」里会看到每只票的 评分、评分变化、建议单股上限%，"
+                          "按这个尺度决定买多少，而不是只决定买不买",
+            },
             "持有期指引(回放证据)": {
                 "结论": "扣费扣beta后的平均超额：5日+0.30%、10日+0.92%、20日+2.34%",
                 "要求": "默认目标持有 %d~20 个交易日；不要为了 1~2 个点的波动反复进出"
@@ -646,9 +689,11 @@ class AITrader:
                 print(color("  ✘ " + msg, "green"))
                 results.append(msg)
                 continue
+            gate_cap = (gate_info or {}).get("max_position_pct")
+            size_cap = (day.get("sizing") or {}).get(code)
+            caps = [x for x in (gate_cap, size_cap) if x]
             ok, why, shares = self.rails.check(
-                a, snap, q, day,
-                cap_override=(gate_info or {}).get("max_position_pct"))
+                a, snap, q, day, cap_override=(min(caps) if caps else None))
             name = q.get("name") or ""
             if not ok:
                 msg = "拒绝 %s %s：%s" % (code, act, why)
