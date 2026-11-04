@@ -525,6 +525,33 @@ const App = (() => {
         <td colspan="2"></td></tr></tfoot></table>`;
   }
 
+  async function loadLearning() {
+    const box = $('learn-card-body');
+    if (!box) return;
+    let m = null, f = null;
+    try { m = await api('/api/missed'); } catch (e) { }
+    try { f = await api('/api/failures'); } catch (e) { }
+    const st = (m && m.stats) || {};
+    const fs = (f && f.stats) || {};
+    const items = (m && m.items) || [];
+    const rows = items.slice(-8).reverse().map(x =>
+      `<tr><td class="l mono">${esc(x.code)}</td><td class="l">${esc(x.name || '')}</td>
+       <td class="${cls(x.pct)}">${pct(x.pct)}</td><td class="dim">${n2(x.price)}</td>
+       <td class="dim">${x.result && x.result.exc10 !== undefined ? (x.result.exc10 >= 0 ? '+' : '') + n2(x.result.exc10) + '%' : '待回填'}</td></tr>`).join('');
+    const tagHtml = (fs.tags && Object.keys(fs.tags).length)
+      ? Object.entries(fs.tags).slice(0, 4).map(([k, v]) => `<span class="tag warn">${esc(k)}×${v}</span>`).join('')
+      : '<span class="dim">还没有亏损平仓记录</span>';
+    box.innerHTML = `
+      <div class="row" style="font-size:12px">
+        <span class="tag">错过清单 ${st.recorded || 0} 条</span>
+        <span class="tag">已回填 ${st.closed || 0} 条</span>
+        <span class="tag">失败样本 ${fs.n || 0} 笔</span>
+      </div>
+      ${rows ? `<table style="margin-top:8px"><thead><tr><th>代码</th><th>名称</th><th>当日涨幅</th><th>价格</th><th>10日超额</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<div class="dim" style="margin-top:8px">还没有记录 —— 收盘复盘(15:05)后自动抓取当日最强票里被规则漏掉的部分，10 个交易日后回填真实收益。</div>'}
+      <div style="margin-top:8px" class="row">${tagHtml}</div>`;
+  }
+
   function watchHtml(ov) {
     const w = ov.watch || [];
     if (!w.length) return '<div class="dim">观察池为空 —— 到「选股池」页让 AI 选股。</div>';
@@ -594,6 +621,8 @@ const App = (() => {
       <div class="grid g2" style="margin-top:14px">
         <div class="card"><h3>权益曲线</h3><div id="kpi-equity">${chart(eq.equity)}</div></div>
         <div class="card"><h3>当前持仓</h3><div id="pos-card-body">${positionsHtml(ov)}</div></div>
+      <div class="card" style="margin-top:12px"><h3>错过清单 · 失败档案 <span class="dim" style="font-weight:400;font-size:12px">（AI 的经验来源）</span></h3>
+        <div id="learn-card-body" class="dim" style="font-size:12px">加载中…</div></div>
       </div>
       <div class="grid g2" style="margin-top:14px">
         <div class="card"><h3>AI 观察池</h3><div id="watch-card-body">${watchHtml(ov)}</div></div>
@@ -616,6 +645,7 @@ const App = (() => {
     setHtml('kpi-cards', kpiCardsHtml(ov));
     setHtml('kpi-equity', chart(eq.equity));
     setHtml('pos-card-body', positionsHtml(ov));
+      loadLearning();
     setHtml('watch-card-body', watchHtml(ov));
     setHtml('plans-card-body', plansHtml(ov));
     setHtml('rails-card-body', railsHtml(ov));

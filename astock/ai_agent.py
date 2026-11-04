@@ -59,6 +59,22 @@ DEFAULT_EXEC = {
     "cancel_if_gap_pct": 1.5,        # 次日高开超过该幅度则取消买入计划
 }
 
+def _failures_brief():
+    try:
+        from . import failures
+        return failures.brief_for_prompt()
+    except Exception as exc:                          # noqa: BLE001
+        return "【失败档案】读取失败：%s" % exc
+
+
+def _missed_brief():
+    try:
+        from . import missed
+        return missed.brief_for_review()
+    except Exception as exc:                          # noqa: BLE001
+        return "【错过清单】读取失败：%s" % exc
+
+
 def _active_rules():
     """给决策用的生效规则（只包含通过统计验证的）。"""
     try:
@@ -587,6 +603,8 @@ class AITrader:
             "风控收紧(代码已生效，不可违反)": gate_info,
             "系统已验证先验(代码维护，优先级最高，不可协商)": priors.text(),
             "板块强度过滤规则": market.sector_rules(self.ai_cfg),
+            "失败档案(代码统计，必须主动规避)": _failures_brief(),
+            "错过清单(最近被规则漏掉的最强票，用于反思自己的选股偏差)": _missed_brief(),
             "仓位加权规则(代码已生效)": {
                 "说明": "单股上限 = min(大盘闸门, 风控上限) × 评分系数；"
                         "评分0-40→0.5、40-50→0.7、60-70→0.9、70+→1.0~1.1；"
@@ -765,7 +783,33 @@ class AITrader:
                 ok2, msg = self.broker.sell(code, px, shares, note=reason)
                 if ok2:
                     day["trades"] += 1
+                    snap_before = snap.copy()
                     snap.update(self._snapshot())
+                    # 亏损平仓 → 自动归档到失败档案（错题本）
+                    try:
+                        from . import failures as _FM
+                        _pos = next((x for x in (snap_before.get("positions") or [])
+                                    if x.get("code") == code), None)
+                        _cost = float((_pos or {}).get("cost") or 0)
+                        _pnl = (px / _cost - 1) * 100 if _cost else 0.0
+                        if _pnl < -0.5:
+                            _hold = None
+                            _ed = (_pos or {}).get("entry_date")
+                            if _ed:
+                                try:
+                                    _hold = (datetime.now() - datetime.strptime(_ed, "%Y-%m-%d")).days
+                                except Exception:
+                                    _hold = None
+                            _FM.log_failure({
+                                "code": code, "name": name, "entry": round(_cost, 3),
+                                "exit": px, "shares": shares, "pnl_pct": round(_pnl, 2),
+                                "hold_days": _hold,
+                                "score": (_pos or {}).get("score"),
+                                "sector_pct": (q or {}).get("sector_pct"),
+                                "reason": reason,
+                            }, verbose=verbose)
+                    except Exception as _exc:                # noqa: BLE001
+                        print(color("  （失败归档跳过：%s）" % _exc, "grey"))
             print(color("  %s %s %s" % ("✔" if ok2 else "✘", code, msg),
                         "red" if act == "BUY" else "cyan"))
             results.append(("✔ " if ok2 else "✘ ") + "%s %s → %s（%s）" % (code, act, msg, reason))
@@ -880,6 +924,12 @@ class AITrader:
 
     # ---------------- ③ 收盘复盘 ----------------
     def phase_review(self, verbose=True):
+        try:                                   # 记录今日"错过清单"并回填历史
+            from . import missed as _MS
+            _MS.record_daily(verbose=verbose)
+            _MS.backfill(verbose=verbose)
+        except Exception as _exc:              # noqa: BLE001
+            print(color("  （错过清单跳过：%s）" % _exc, "grey"))
         if verbose:
             print(color("\n【③ 收盘复盘】AI 正在审判自己…", "bold"))
         snap = self._snapshot()

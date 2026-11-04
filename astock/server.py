@@ -766,6 +766,28 @@ def api_held(_q):
         return {"items": [], "error": str(exc)}
 
 
+def api_missed(_q):
+    """错过清单：被规则漏掉的最强票 + 入池/未入池的真实表现对比。"""
+    try:
+        from . import missed
+        s = missed.stats()
+        items = [x for x in missed._read() if not x.get("in_pool")][-30:]
+        return {"stats": s, "items": list(reversed(items)),
+                "brief": missed.brief_for_review()}
+    except Exception as exc:                          # noqa: BLE001
+        return {"stats": {}, "items": [], "error": str(exc)}
+
+
+def api_failures(_q):
+    """失败档案：亏损平仓记录 + 归因统计。"""
+    try:
+        from . import failures
+        return {"stats": failures.stats(), "brief": failures.brief_for_prompt(),
+                "items": failures._read()[-30:]}
+    except Exception as exc:                          # noqa: BLE001
+        return {"stats": {}, "items": [], "error": str(exc)}
+
+
 def api_priors(_q):
     """系统已验证的先验（代码维护，AI 不可修改）。"""
     return {"items": priors.VERIFIED, "text": priors.text()}
@@ -1276,6 +1298,8 @@ GET_ROUTES = {
     "/api/market": api_market,
     "/api/regime": api_regime,
     "/api/priors": api_priors,
+    "/api/missed": api_missed,
+    "/api/failures": api_failures,
     "/api/search": api_search,
     "/api/held": api_held,
     "/api/altstatus": api_altstatus,
