@@ -880,14 +880,23 @@ def api_playbook_rollback(body):
     return ({"ok": True, "message": msg} if ok else None), (None if ok else msg)
 
 
+_RULES_CACHE = {"ts": 0.0, "data": None}
+RULES_TTL = 60.0
+
+
 def api_rules(_q):
-    """经验规则库：生效/候选/淘汰 + 升格门槛。"""
+    """经验规则库：生效/候选/淘汰 + 升格门槛（60 秒缓存，避免每次刷新都全量统计）。"""
+    import time as _t
+    now = _t.time()
+    if _RULES_CACHE["data"] and now - _RULES_CACHE["ts"] < RULES_TTL:
+        return _RULES_CACHE["data"]
     try:
         rules.link_from_hypotheses()
     except Exception:
         pass
     s = rules.summary()
     s["prompt_view"] = rules.active_for_prompt()
+    _RULES_CACHE.update({"ts": now, "data": s})
     return s
 
 

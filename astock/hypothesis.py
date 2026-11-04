@@ -38,13 +38,16 @@ def _ensure():
 _CACHE = {"key": None, "data": None}
 
 
-def _read_jsonl(path):
+def _read_jsonl(path, stride=1):
+    """读 jsonl；stride>1 时等距抽样（大文件防 OOM）。"""
     out = []
     if not os.path.exists(path):
         return out
     try:
         with open(path, encoding="utf-8-sig") as f:
-            for line in f:
+            for i, line in enumerate(f):
+                if stride > 1 and i % stride:
+                    continue
                 line = line.strip()
                 if not line:
                     continue
@@ -84,7 +87,16 @@ def load_all(use_cache=True, include_replay=True):
     except Exception:
         pass
     if include_replay:
-        out = out + _read_jsonl(REPLAY_PATH)
+        # 大文件自动等距抽样：容器内存只有 1GB，绝不能把上百 MB 读进内存
+        try:
+            sz = os.path.getsize(REPLAY_PATH)
+        except OSError:
+            sz = 0
+        stride = max(1, int(sz / (16 * 1024 * 1024))) if sz > 16 * 1024 * 1024 else 1
+        out = out + _read_jsonl(REPLAY_PATH, stride)
+        if stride > 1:
+            out.append({"__stride__": stride})
+            out.pop()
     _CACHE.update({"key": key, "data": out})
     return out
 
