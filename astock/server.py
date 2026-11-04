@@ -767,6 +767,87 @@ def api_held(_q):
         return {"items": [], "error": str(exc)}
 
 
+_PA_CACHE = {"ts": 0.0, "data": None}
+PA_TTL = 120.0
+
+
+def api_paper_analysis(_q):
+    """AI 模拟盘持仓详情 + 逐只持仓分析（技术面 / 风控 / 建议）。"""
+    import time as _t
+    now = _t.time()
+    if _PA_CACHE["data"] and now - _PA_CACHE["ts"] < PA_TTL:
+        return _PA_CACHE["data"]
+    try:
+        from . import signals as _sg
+    except Exception:
+        _sg = None
+    cfg = load_config()
+    ai = cfg.get("ai") or {}
+    b = broker()
+    codes = list(b.positions.keys())
+    qs = quotes(codes)
+    snap = b.mark({c: (qs.get(c) or {}).get("price") for c in codes
+                   if (qs.get(c) or {}).get("price")})
+    total_mv = snap.get("market_value") or 0
+    items = []
+    for p_ in snap.get("positions") or []:
+        code = p_.get("code")
+        q = qs.get(code) or {}
+        it = dict(p_)
+        it["name"] = p_.get("name") or q.get("name") or ""
+        it["weight_pct"] = round((p_.get("market_value") or 0) / total_mv * 100, 1) if total_mv else None
+        stop_v = p_.get("stop")
+        px = p_.get("price") or p_.get("last_price") or p_.get("cost") or 0
+        if stop_v:
+            it["dist_stop_pct"] = round((px / float(stop_v) - 1) * 100, 2)
+            it["risk_amount"] = round((px - float(stop_v)) * int(p_.get("shares") or 0), 2)
+        else:
+            it["dist_stop_pct"] = None
+            it["risk_amount"] = None
+        sc = None
+        if _sg:
+            try:
+                rep = _sg.build_report(code, ai)
+                sc = (rep.get("scores") or {}).get("total")
+                vd = rep.get("verdict") or {}
+                lv = rep.get("levels") or {}
+                ind = rep.get("indicators") or {}
+                it.update({
+                    "score": sc, "level": vd.get("level"), "action": vd.get("action"),
+                    "right": vd.get("right"), "left": vd.get("left"),
+                    "stop_ref": lv.get("stop"),
+                    "targets": lv.get("targets") or [],
+                    "support": lv.get("support") or [],
+                    "resistance": lv.get("resistance") or [],
+                    "ma20": ind.get("ma20") or rep.get("ma20"),
+                    "rsi6": ind.get("rsi6") or rep.get("rsi6"),
+                    "pct_pos60": ind.get("pct_pos60") or rep.get("pct_pos60"),
+                    "checklist": rep.get("checklist_ok"),
+                })
+            except Exception as exc:                  # noqa: BLE001
+                it["analysis_error"] = str(exc)[:80]
+        # 一句话建议（代码判定，稳定可解释）
+        pnl = p_.get("pnl_pct") or 0
+        if stop_v and px <= float(stop_v):
+            adv = "已跌破止损 %s，按纪律清仓" % stop_v
+        elif sc is not None and sc >= 62 and pnl > 0:
+            adv = "强势持有，回踩不破止损可加"
+        elif sc is not None and sc < 40:
+            adv = "技术面转弱，反弹减仓"
+        elif it.get("dist_stop_pct") is not None and it["dist_stop_pct"] <= 1.5:
+            adv = "贴近止损，破位即走"
+        else:
+            adv = "持有观察，守止损 %s" % (stop_v or "—")
+        it["advice"] = adv
+        items.append(it)
+    out = {"items": items, "account": {"cash": snap.get("cash"),
+                                       "market_value": snap.get("market_value"),
+                                       "equity": snap.get("equity"),
+                                       "total_return_pct": snap.get("total_return_pct")}}
+    _PA_CACHE.update({"ts": now, "data": out})
+    return out
+
+
 def api_missed(_q):
     """错过清单：被规则漏掉的最强票 + 入池/未入池的真实表现对比。"""
     try:
@@ -1300,6 +1381,7 @@ GET_ROUTES = {
     "/api/regime": api_regime,
     "/api/priors": api_priors,
     "/api/missed": api_missed,
+    "/api/paper_analysis": api_paper_analysis,
     "/api/failures": api_failures,
     "/api/search": api_search,
     "/api/held": api_held,

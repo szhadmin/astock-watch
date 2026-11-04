@@ -739,6 +739,30 @@ class AITrader:
         try:
             adv = data.get("我的持仓操作建议") or []
             if adv:
+                # 统一字段名 + 补全股票名（模型有时只给代码）
+                try:
+                    from . import holdings as _H
+                    nmap = {}
+                    for _it in (_H.load().get("items") or []):
+                        if _it.get("code"):
+                            nmap[_it["code"]] = _it.get("name") or ""
+                    for _p in (snap.get("positions") or []):
+                        if _p.get("code") and _p.get("name"):
+                            nmap.setdefault(_p["code"], _p["name"])
+                    for _a in adv:
+                        _a["建议"] = _a.get("建议") or _a.get("advice") or ""
+                        _a["触发位"] = _a.get("触发位") or _a.get("trigger") or ""
+                        _a["理由"] = _a.get("理由") or _a.get("reason") or ""
+                        if not _a.get("name"):
+                            _c = _a.get("code")
+                            _a["name"] = nmap.get(_c) or ""
+                            if not _a["name"]:
+                                try:
+                                    _a["name"] = feed.get_quote(_c).get("name") or ""
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
                 path = os.path.join(BASE, "data", "holdings_advice.json")
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump({"ts": datetime.now().strftime("%Y-%m-%d %H:%M"),

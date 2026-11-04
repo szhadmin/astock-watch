@@ -525,6 +525,40 @@ const App = (() => {
         <td colspan="2"></td></tr></tfoot></table>`;
   }
 
+  async function loadPaperDetail() {
+    const box = $('paper-detail');
+    if (!box) return;
+    let d = null;
+    try { d = await api('/api/paper_analysis'); } catch (e) {
+      box.innerHTML = '读取失败：' + esc(e.message); return;
+    }
+    const items = (d && d.items) || [];
+    if (!items.length) { box.innerHTML = '<div class="dim">空仓中，没有需要分析的持仓。</div>'; return; }
+    box.innerHTML = items.map(p => `
+      <div class="card" style="margin-top:8px;background:#0d1622">
+        <div class="row">
+          <b style="cursor:pointer" onclick="App.openKline('${esc(p.code)}')">${esc(p.name || '')}
+            <span class="dim mono">${esc(p.code)}</span></b>
+          <span class="tag">${p.shares}股 · 可卖 ${p.available === undefined ? '--' : p.available}</span>
+          <span class="mono ${cls(p.pnl)}">${n2(p.price)}（${pct(p.pnl_pct)}）</span>
+          <span class="${cls(p.pnl)}">${p.pnl >= 0 ? '+' : ''}${money(p.pnl)} 元</span>
+          <span class="spacer"></span>
+          <span class="tag">${esc(p.level || '')} ${p.score === undefined || p.score === null ? '' : p.score + '分'}</span>
+        </div>
+        <div class="grid g3" style="margin-top:8px">
+          <div><div class="dim" style="font-size:12px">持仓</div>
+            <div>成本 ${n2(p.cost, 3)} · 市值 ${money(p.market_value)}</div>
+            <div class="dim" style="font-size:12px">占模拟盘 ${n2(p.weight_pct, 1)}% · 入场 ${esc(p.entry_date || '')}</div></div>
+          <div><div class="dim" style="font-size:12px">风控</div>
+            <div>止损 ${n2(p.stop)} · 距止损 ${p.dist_stop_pct === null || p.dist_stop_pct === undefined ? '--' : pct(p.dist_stop_pct)}</div>
+            <div class="dim" style="font-size:12px">目标 ${(p.targets || []).map(x => n2(x)).join(' → ') || '--'} · 风险金额 ${p.risk_amount === null || p.risk_amount === undefined ? '--' : money(p.risk_amount) + ' 元'}</div></div>
+          <div><div class="dim" style="font-size:12px">技术面</div>
+            <div>MA20 ${n2(p.ma20)} · RSI6 ${n2(p.rsi6, 1)} · 60日分位 ${p.pct_pos60 === null || p.pct_pos60 === undefined ? '--' : n2(p.pct_pos60, 0) + '%'}</div>
+            <div class="${p.advice && p.advice.indexOf('清仓') >= 0 ? 'down' : 'up'}" style="font-size:12px">${esc(p.advice || '')}</div></div>
+        </div>
+      </div>`).join('');
+  }
+
   async function loadLearning() {
     const box = $('learn-card-body');
     if (!box) return;
@@ -621,6 +655,8 @@ const App = (() => {
       <div class="grid g2" style="margin-top:14px">
         <div class="card"><h3>权益曲线</h3><div id="kpi-equity">${chart(eq.equity)}</div></div>
         <div class="card"><h3>当前持仓</h3><div id="pos-card-body">${positionsHtml(ov)}</div></div>
+      <div class="card" style="margin-top:12px"><h3>持仓详情与 AI 分析 <span class="dim" style="font-weight:400;font-size:12px">（逐只技术面/风控/建议）</span></h3>
+        <div id="paper-detail" class="dim" style="font-size:12px">加载中…</div></div>
       <div class="card" style="margin-top:12px"><h3>错过清单 · 失败档案 <span class="dim" style="font-weight:400;font-size:12px">（AI 的经验来源）</span></h3>
         <div id="learn-card-body" class="dim" style="font-size:12px">加载中…</div></div>
       </div>
@@ -645,6 +681,7 @@ const App = (() => {
     setHtml('kpi-cards', kpiCardsHtml(ov));
     setHtml('kpi-equity', chart(eq.equity));
     setHtml('pos-card-body', positionsHtml(ov));
+      loadPaperDetail();
       loadLearning();
     setHtml('watch-card-body', watchHtml(ov));
     setHtml('plans-card-body', plansHtml(ov));
