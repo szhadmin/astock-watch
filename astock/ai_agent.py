@@ -43,12 +43,12 @@ RAILS_DEFAULT = {
     "max_risk_per_trade_pct": 1.5,   # 单笔（成本-止损）最大亏损占总资金
     "daily_loss_limit_pct": 3.0,     # 当日亏损超过即当日禁止开新仓
     "min_price": 2.0,
-    "max_price": 40.0,
+    "max_price": 60.0,
     "price_band_pct": 2.5,           # 委托价与最新价最大偏离
     "forbid_buy_pct": 8.0,           # 当日涨幅超过该值禁止买入（不追涨停）
     "forbid_sell_pct": -8.0,         # 当日跌幅超过该值不卖（避免恐慌盘割在地板）
     "lot": 100,
-    "min_shares": 200,               # 最小开仓股数（少于此手续费不经济）
+    "min_shares": 100,               # 最小开仓股数（少于此手续费不经济）
     # 组合级风控（AI 自己在复盘里提出的：单笔合规不等于组合合规）
     "max_total_risk_pct": 3.0,       # 全部持仓「到止损的距离」之和占总资金上限
 }
@@ -58,6 +58,25 @@ DEFAULT_EXEC = {
     "defer_outside_session": True,   # 非交易时段只生成计划单，不用收盘价事后成交
     "cancel_if_gap_pct": 1.5,        # 次日高开超过该幅度则取消买入计划
 }
+
+def _participation_brief(cfg=None):
+    """用户设定的参与度：决定"信号不完美时要不要参与"。"""
+    ai = ((cfg or {}).get("ai") or {}) if isinstance(cfg, dict) else {}
+    level = str(ai.get("participation") or "balanced").lower()
+    table = {
+        "conservative": ("保守", "只在信号齐全（趋势+量能+板块+止损明确）时开仓；不完美就空仓，接受错过。"),
+        "balanced": ("均衡", "允许在候选质量合格时建 1 只「试错仓」：单只 ≤ 总资金 15%，必须带止损；"
+                          "**试错仓不要求「评分变化≥+5」这类苛刻条件**，只要满足：板块非弱势、"
+                          "止损明确且距离 ≤8%、单笔风险 ≤1.5%、组合风险预算有余量，即可建仓；"
+                          "不得以「大盘过热 / 追高性价比低 / 计划单为空」为由完全不参与。"
+                          "试错仓就是用来在震荡或过热行情里小仓试探的，跌破止损立刻离场。"),
+        "aggressive": ("积极", "允许最多 2 只试错仓，合计 ≤ 总资金 30%，每只必须带止损；"
+                             "目标是尽量参与强势行情，容忍更高回撤。"),
+    }
+    name, desc = table.get(level, table["balanced"])
+    return {"档位": name, "规则": desc,
+            "提醒": "试错仓不是重仓：先小仓试错，方向对了再按评分加仓；方向错了止损离场，不许扛。"}
+
 
 def _idle_state():
     """统计连续多少个交易日没有开新仓，并给出"别把空仓当纪律"的提醒。"""
@@ -232,9 +251,9 @@ class RiskRails:
                 shares = int((cash / (px * 1.001)) // c["lot"] * c["lot"])
                 if shares <= 0:
                     return False, "现金不足", 0
-            if shares < int(c.get("min_shares", 200)):
+            if shares < int(c.get("min_shares", 100)):
                 return False, "算下来只能买 %d 股（< %d 股），手续费不经济，放弃本次开仓" % (
-                    shares, int(c.get("min_shares", 200))), 0
+                    shares, int(c.get("min_shares", 100))), 0
             # 组合级风险预算：已有持仓「到止损的距离」+ 本次新增，不得超过上限
             risk_pct = float(c.get("max_total_risk_pct", 3.0))
             if force_open:                       # 用户手动授权：组合风险预算放宽
@@ -254,7 +273,7 @@ class RiskRails:
                     return False, ("组合止损风险已用 %.0f/%.0f 元（达上限 %.1f%%），本次不开仓"
                                    % (used, total_budget, c.get("max_total_risk_pct", 2.0))), 0
                 shares = int((room / (px - stop)) // c["lot"] * c["lot"])
-                if shares < int(c.get("min_shares", 200)):
+                if shares < int(c.get("min_shares", 100)):
                     return False, ("组合风险预算只剩 %.0f 元，只能买 %d 股，不经济，放弃"
                                    % (room, shares)), 0
             return True, "过风控（%d 股，本笔风险 %.0f 元 / 组合 %.0f+%.0f=%.0f 元，上限 %.0f）" % (
@@ -393,8 +412,10 @@ class AITrader:
         """当日综合评分与"5 日前的评分"，用于评分变化率（回放显示它比绝对值更有信息量）。"""
         try:
             from . import strategy as _st
-            bars = feed.get_kline(code, 101, limit=45)
-            if len(bars) < 30:
+            # 评分要用 MA60 / 60 日分位，至少给 160 根（原来只取 45 根，
+            # 长周期指标算不出来 → 评分恒为 0，会导致「评分变化≥+5」闸门永远过不了）
+            bars = feed.get_kline(code, 101, limit=160)
+            if len(bars) < 70:
                 return None, None
             now = _st.evaluate(bars, len(bars) - 1).get("score")
             prev = _st.evaluate(bars, len(bars) - 6).get("score")
@@ -668,6 +689,7 @@ class AITrader:
                              "禁止用「昨日计划单为空」作为不开仓的理由——那会形成"
                              "『不开仓→计划单空→更不开仓』的死循环，属于系统性错失。"),
             "开仓节奏(代码统计)": _idle_state(),
+            "参与度设定(用户偏好，必须遵守)": _participation_brief(self.cfg),
             "持仓": positions,
             "观察池": watch,
             "要求": {
@@ -726,7 +748,19 @@ class AITrader:
                 print(color("  已生成 %d 只真实持仓的操作建议" % len(adv), "grey"))
         except Exception as exc:
             print(color("  （持仓建议保存失败：%s）" % exc, "yellow"))
-        results = self._execute(data.get("actions") or [], snap, watch, day)
+        acts = data.get("actions") or []
+        if not any((a.get("action") or "").upper() == "BUY" for a in acts):
+            try:
+                trial = self._trial_candidate(watch, day, snap)
+                if trial:
+                    acts.append(trial)
+                    data["actions"] = acts
+                    print(color("  ⓘ 均衡档：AI 未主动开仓 → 代码补 1 只试错仓 %s（%d 股 @%.2f，止损 %.2f）"
+                                % (trial["code"], trial["shares"], trial["limit_price"], trial["stop"]),
+                                "yellow"))
+            except Exception as exc:                       # noqa: BLE001
+                print(color("  （试错仓判定失败：%s）" % exc, "grey"))
+        results = self._execute(acts, snap, watch, day)
         memory.append_journal(
             "【操盘】%s\n%s\n执行：%s" % (view, data.get("journal", ""),
                                     "\n".join(results) if results else "无操作"),
@@ -739,6 +773,68 @@ class AITrader:
         self.broker.record_equity(self._snapshot(),
                                   extra={"index": self._index_close()})
         return data
+
+    def _trial_candidate(self, watch, day, snap=None):
+        """均衡档强制参与：挑 1 只满足硬条件的标的做试错仓。
+
+        准入（代码判定，不给模型自由裁量）：
+          评分 ≥50、评分变化 ≥-6、板块不弱势、止损距离 ≤8%、
+          单笔风险 ≤ 风控上限、组合预算有余量、当日交易笔数未满。
+        """
+        ai = (self.cfg.get("ai") or {}) if isinstance(self.cfg, dict) else {}
+        if str(ai.get("participation") or "balanced").lower() != "balanced":
+            return None
+        c = self.rails.cfg
+        best = None
+        for it in watch or []:
+            code = it.get("code")
+            px = it.get("现价") or it.get("price")
+            sc = it.get("评分")
+            chg = it.get("评分变化")
+            if not code or not px:
+                continue
+            if sc is None or sc < float(ai.get("trial_min_score", 50)):
+                continue
+            if chg is not None and chg < float(ai.get("trial_min_score_chg", -6)):
+                continue
+            if it.get("⚠板块"):
+                continue
+            # 止损：优先用近 20 日支撑，其次 -5.5%
+            stop = None
+            try:
+                sup = (it.get("近20日支撑") or it.get("support20"))
+                stop = float(sup) if sup else None
+            except Exception:
+                stop = None
+            if not stop or stop >= px or (px - stop) / px > 0.08:
+                stop = round(px * 0.945, 2)
+            if (px - stop) / px > 0.08:
+                continue
+            dev = (px - stop) / px * 100
+            if dev <= 0:
+                continue
+            key = (sc or 0) * 10 + (chg or 0)
+            # 买得起吗？按其最小手数算：买不起就跳过，别选到买不起的票
+            lot_i = 200 if str(code).startswith(("688", "689")) else 100
+            cash_i = float((snap or {}).get("cash") or 0)
+            eq_i = float((snap or {}).get("equity") or 0) or cash_i
+            budget_i = min(cash_i * 0.95,
+                           eq_i * float(ai.get("trial_max_pct", 15)) / 100)
+            if lot_i * px > budget_i:
+                continue
+            if best is None or key > best[0]:
+                best = (key, code, it.get("name") or "", px, stop, sc, chg, lot_i, budget_i)
+        if not best:
+            return None
+        _k, code, name, px, stop, sc, chg, lot, budget = best
+        max_by_cash = int(budget / px // lot * lot)
+        shares = min(int(ai.get("trial_shares", 200)), max_by_cash)
+        if shares < lot:
+            return None
+        return {"code": code, "name": name, "action": "BUY", "shares": shares,
+                "limit_price": round(px, 3), "stop": stop,
+                "reason": ("均衡档试错仓（代码强制参与）：评分 %s、评分变化 %s、"
+                           "止损 %.2f（距离 %.1f%%）、小仓 %d 股" % (sc, chg, stop, dev, shares))}
 
     def _execute(self, actions, snap, watch, day):
         allowed_codes = {p["code"] for p in snap["positions"]} | set(self.watchlist) \

@@ -254,13 +254,18 @@ def send_digest(kind, journal="", plans=None, advices=None, account=None, temp=N
     else:
         parts.append("<h3>明日计划单</h3><div class='sub'>无（AI 判断明日不动作，空仓也是一种决策）</div>")
     if advices:
+        def _f(a):
+            """数据是中文键（建议/触发位/理由），兼容英文旧键。"""
+            adv = a.get("建议") or a.get("advice") or "-"
+            trig = a.get("触发位") or a.get("trigger") or "-"
+            rsn = a.get("理由") or a.get("reason") or ""
+            tone = ("up" if adv in ("加仓", "买入") else
+                    ("down" if adv in ("减仓", "清仓", "止损", "卖出") else ""))
+            return ((("%s %s" % (a.get("code"), a.get("name") or "")).strip(),
+                     tone, adv, trig, str(rsn)[:70]))
         rows = "".join(
             "<tr><td>%s</td><td class='%s'>%s</td><td>%s</td><td>%s</td></tr>"
-            % (("%s %s" % (a.get("code"), a.get("name") or "")).strip(),
-               "up" if a.get("advice") in ("加仓", "买入") else
-               ("down" if a.get("advice") in ("减仓", "清仓", "止损", "卖出") else ""),
-               a.get("advice") or "-", a.get("trigger") or "-", (a.get("reason") or "")[:70])
-            for a in advices)
+            % _f(a) for a in advices)
         parts.append("<h3>我的持仓操作建议</h3><table>"
                      "<tr><th>标的</th><th>建议</th><th>触发位</th><th>理由</th></tr>%s</table>" % rows)
     if account:
