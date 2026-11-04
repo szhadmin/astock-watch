@@ -50,7 +50,7 @@ RAILS_DEFAULT = {
     "lot": 100,
     "min_shares": 200,               # 最小开仓股数（少于此手续费不经济）
     # 组合级风控（AI 自己在复盘里提出的：单笔合规不等于组合合规）
-    "max_total_risk_pct": 2.0,       # 全部持仓「到止损的距离」之和占总资金上限
+    "max_total_risk_pct": 3.0,       # 全部持仓「到止损的距离」之和占总资金上限
 }
 
 # 下单执行策略
@@ -162,7 +162,7 @@ class RiskRails:
                 "当日亏损>%.0f%%即停止开仓｜价格区间 %.1f~%.1f 元｜委托价偏离≤%.1f%%"
                 % (c["max_position_pct"], c["max_total_position_pct"],
                    c["max_trades_per_day"], c["max_risk_per_trade_pct"],
-                   c.get("max_total_risk_pct", 2.0),
+                   c.get("max_total_risk_pct", 3.0),
                    c["daily_loss_limit_pct"], c["min_price"], c["max_price"],
                    c["price_band_pct"]))
 
@@ -236,7 +236,7 @@ class RiskRails:
                 return False, "算下来只能买 %d 股（< %d 股），手续费不经济，放弃本次开仓" % (
                     shares, int(c.get("min_shares", 200))), 0
             # 组合级风险预算：已有持仓「到止损的距离」+ 本次新增，不得超过上限
-            risk_pct = float(c.get("max_total_risk_pct", 2.0))
+            risk_pct = float(c.get("max_total_risk_pct", 3.0))
             if force_open:                       # 用户手动授权：组合风险预算放宽
                 risk_pct = max(risk_pct, float(c.get("max_total_risk_pct_manual", 3.0)))
                 print(color("  ⓘ 手动授权开仓：组合风险预算按 %.1f%% 计（原 %.1f%%）"

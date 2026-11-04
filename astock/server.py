@@ -1344,7 +1344,8 @@ class Handler(BaseHTTPRequestHandler):
         if os.environ.get("ASTOCK_VERBOSE"):
             sys.__stderr__.write("[web] %s\n" % (fmt % args))
 
-    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+    def _send(self, code, body, ctype="application/json; charset=utf-8",
+               extra=None):
         if isinstance(body, (dict, list)):
             body = json.dumps(body, ensure_ascii=False, default=str).encode("utf-8")
         elif isinstance(body, str):
@@ -1399,6 +1400,25 @@ class Handler(BaseHTTPRequestHandler):
                  "application/octet-stream")
         with open(p, "rb") as f:
             data = f.read()
+        if name.endswith(".html"):
+            # 给 app.js / style.css 打上文件修改时间作为版本号，
+            # 彻底避免浏览器拿旧缓存（否则改了前端看不出效果）
+            try:
+                def _ver(fn):
+                    try:
+                        return str(int(os.path.getmtime(os.path.join(WEB_DIR, fn))))
+                    except OSError:
+                        return "0"
+                text = data.decode("utf-8")
+                text = text.replace("/static/app.js",
+                                    "/static/app.js?v=" + _ver("app.js"))
+                text = text.replace("/static/style.css",
+                                    "/static/style.css?v=" + _ver("style.css"))
+                data = text.encode("utf-8")
+            except Exception:
+                pass
+            self._send(200, data, ctype, extra=[("Cache-Control", "no-cache, must-revalidate")])
+            return
         self._send(200, data, ctype)
 
     def _report_file(self, rel):
