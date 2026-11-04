@@ -565,6 +565,7 @@ const App = (() => {
       <div class="row" style="margin-top:12px">
         <button class="btn primary" onclick="App.run('decide')">立即决策</button>
         <button class="btn" onclick="App.run('pick')">AI 选股</button>
+        <button class="btn" onclick="App.forceOpen()">强制开仓</button>
         <button class="btn" onclick="App.run('review')">收盘复盘</button>
         <button class="btn" onclick="App.refreshDashboard()">刷新数据</button>
       </div>
@@ -2039,6 +2040,21 @@ const App = (() => {
   }
 
   /* ---------------- 任务与日志 ---------------- */
+  async function forceOpen() {
+    if (!confirm('「强制开仓」会绕过"大盘弱势不开新仓"的闸门，让 AI 在观察池/候选里主动挑 1 只买入。\n\n'
+      + '硬性风控仍然生效（单票上限、单笔止损、价格区间、禁买涨幅≥8%）。\n\n确定执行？')) return;
+    try {
+      const r = await fetch('/api/run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'force' })
+      }).then(x => x.json());
+      if (r && r.error) { alert('提交失败：' + r.error); return; }
+      toast('已提交「强制开仓」，AI 正在挑票…');
+      if (typeof watchJob === 'function') { try { watchJob(r.job || r); } catch (e) { } }
+      setTimeout(() => route(S.tab, true), 3000);
+    } catch (e) { alert('提交失败：' + e.message); }
+  }
+
   async function run(kind) {
     try {
       const r = await post('/api/run', { kind });
@@ -2211,7 +2227,7 @@ const App = (() => {
     document.addEventListener('DOMContentLoaded', init);
 
   return {
-    route, run, watchJob, closeJob, reset, saveConfig, saveSchedule, ping,
+    route, run, forceOpen, watchJob, closeJob, reset, saveConfig, saveSchedule, ping,
     showDecision, showPrompt, showReport, showJournal, showPb, showFailed,
     addWatch, saveWatch, openKline, selectJob, setKlinePeriod, setKlineDays,
     toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore,

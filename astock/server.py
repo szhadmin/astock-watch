@@ -155,7 +155,7 @@ JOB_LOCK = threading.Lock()
 MAX_CONCURRENT = 4
 
 ACCOUNT_LOCK = threading.Lock()          # 会改持仓/现金的任务必须串行
-ACCOUNT_KINDS = ("decide", "execute", "auto")
+ACCOUNT_KINDS = ("decide", "execute", "auto", "force")
 _TL = threading.local()
 
 
@@ -259,6 +259,8 @@ def run_phase(params):
     trader = ai_agent.AITrader(cfg)
     if kind == "pick":
         trader.phase_pick()
+    elif kind == "force":
+        trader.phase_decide(verbose=True, force_open=True)
     elif kind == "decide":
         trader.phase_decide()
     elif kind == "plan":
@@ -702,7 +704,7 @@ def api_config_set(body):
 
 def api_run(body):
     kind = (body.get("kind") or "").strip()
-    if kind not in ("pick", "decide", "review", "auto", "scan", "execute",
+    if kind not in ("pick", "decide", "force", "review", "auto", "scan", "execute",
                     "daily", "plan", "replay", "discover"):
         return None, "未知任务类型"
     if kind == "scan":
@@ -1439,6 +1441,11 @@ def serve(host="127.0.0.1", port=8770, scheduler=True, open_browser=False):
     memory.ensure_dirs()
     try:                                   # 样本库增量同步进 SQLite
         from . import hypdb
+        try:                       # 先裁剪过老样本，避免每次启动重复导入再删除
+            from . import replay as _rp
+            _rp._prune_jsonl(730)
+        except Exception:
+            pass
         hypdb.sync(verbose=True)
         hypdb.purge_older_than_days(730)
     except Exception as exc:

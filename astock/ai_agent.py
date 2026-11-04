@@ -129,7 +129,7 @@ class RiskRails:
                    c["daily_loss_limit_pct"], c["min_price"], c["max_price"],
                    c["price_band_pct"]))
 
-    def check(self, order, snap, quote, day_state, cap_override=None):
+    def check(self, order, snap, quote, day_state, cap_override=None, force_open=False):
         """返回 (ok, reason, shares)。order 为 AI 给出的原始指令。"""
         c = self.cfg
         code = order.get("code")
@@ -199,7 +199,12 @@ class RiskRails:
                 return False, "算下来只能买 %d 股（< %d 股），手续费不经济，放弃本次开仓" % (
                     shares, int(c.get("min_shares", 200))), 0
             # 组合级风险预算：已有持仓「到止损的距离」+ 本次新增，不得超过上限
-            total_budget = self.capital * float(c.get("max_total_risk_pct", 2.0)) / 100
+            risk_pct = float(c.get("max_total_risk_pct", 2.0))
+            if force_open:                       # 用户手动授权：组合风险预算放宽
+                risk_pct = max(risk_pct, float(c.get("max_total_risk_pct_manual", 3.0)))
+                print(color("  ⓘ 手动授权开仓：组合风险预算按 %.1f%% 计（原 %.1f%%）"
+                            % (risk_pct, float(c.get("max_total_risk_pct", 2.0))), "yellow"))
+            total_budget = self.capital * risk_pct / 100
             used = 0.0
             for p in snap["positions"]:
                 sp = p.get("stop") or 0
@@ -435,11 +440,14 @@ class AITrader:
         return data
 
     # ---------------- ② 操盘决策 ----------------
-    def phase_decide(self, verbose=True, force_plan=False):
+    def phase_decide(self, verbose=True, force_plan=False, force_open=False):
         if verbose:
             print(color("\n【② 操盘决策】收集盘面数据…", "bold"))
         snap = self._snapshot()
         day = self._day_state(snap)
+        if force_open:
+            day["force_open"] = True
+            day["force_plan"] = False          # 手动授权要立刻成交，不等次日
         positions = []
         for p in snap["positions"]:
             try:
@@ -474,6 +482,14 @@ class AITrader:
                             "主力净流入万": round(s["main_in"] / 1e4, 0)}
                            for s in market.sector_board(8)]
             gate_info = market.gate(temp_info)
+            if force_open:                       # 用户手动授权：解除闸门冻结
+                gate_info = dict(gate_info or {})
+                gate_info.update({
+                    "mode": "manual-open",
+                    "allow_new": True,
+                    "max_position_pct": max(float(gate_info.get("max_position_pct") or 20.0), 20.0),
+                    "note": "【用户手动授权】本轮的「不开新仓」冻结已解除；硬性风控（价格区间/单票上限/单笔止损/禁买≥8%）仍然生效",
+                })
         except Exception as exc:                       # noqa: BLE001
             temp_info, sector_rows, gate_info = None, [], None
             print(color("  （大盘温度获取失败：%s，按常规风控）" % exc, "grey"))
@@ -610,6 +626,18 @@ class AITrader:
                        "禁止编造未在数据中出现的代码或价格"],
             },
         }
+        if force_open:
+            payload["【用户手动授权·主动开仓】"] = (
+                "本轮由用户在网页上手动点了「强制开仓」，大盘闸门的冻结已解除。"
+                "你必须从「观察池 / 候选」中选出 1 只（最多 2 只）最符合手册与先验的标的，"
+                "给出 BUY，并写明止损价、整手股数与具体依据；股数按「建议单股上限%」取值。"
+                "硬性风控不可违反（价格区间、单票上限、单笔止损、禁买涨幅≥8%、最少 200 股）。"
+                "如果确实一个都不合格，允许输出空 actions 并逐条说明为什么不合格。")
+            try:
+                payload["要求"]["原则"] = list(payload["要求"]["原则"]) + [
+                    "本轮是用户手动授权的主动开仓：至少给 1 条 BUY（除非全部标的不合格并说明理由）"]
+            except Exception:
+                pass
         user = json.dumps(payload, ensure_ascii=False)
         self._log_prompt("decide", user)
         text, usage = self.llm.chat(SYSTEM_STRATEGIST, user,
@@ -700,7 +728,8 @@ class AITrader:
             size_cap = (day.get("sizing") or {}).get(code)
             caps = [x for x in (gate_cap, size_cap) if x]
             ok, why, shares = self.rails.check(
-                a, snap, q, day, cap_override=(min(caps) if caps else None))
+                a, snap, q, day, cap_override=(min(caps) if caps else None),
+                force_open=bool(day.get("force_open")))
             name = q.get("name") or ""
             if not ok:
                 msg = "拒绝 %s %s：%s" % (code, act, why)
