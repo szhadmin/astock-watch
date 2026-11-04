@@ -134,10 +134,14 @@ def analyze(cfg=None, verbose=False, use_cache=True):
                 sizing_txt = "-"
         except Exception:
             cap, sizing_txt = None, "-"
+        smap = _sellable_map_cache()
+        sellable = (max(0, min(smap[code]["sellable"], it["shares"]))
+                    if code in smap else it["shares"])
         lv = rep["levels"]
         rows.append({
             "code": code, "name": rep.get("name") or it.get("name") or "",
-            "shares": it["shares"], "cost": it["cost"], "price": price,
+            "shares": it["shares"], "sellable": sellable,
+            "cost": it["cost"], "price": price,
             "pct": rep.get("pct") or 0, "mv": round(mv, 2),
             "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2),
             "score": rep["scores"]["total"], "level": rep["verdict"]["level"],
@@ -164,6 +168,8 @@ def analyze(cfg=None, verbose=False, use_cache=True):
         "pnl_pct": round((total_mv / total_cost - 1) * 100, 2) if total_cost else 0,
         "position_pct": round(total_cost / capital * 100, 1) if capital else 0,
         "count": len([r for r in rows if r.get("ok")]),
+        "sellable_total": sum(int(r.get("sellable") or 0) for r in rows if r.get("ok")),
+        "shares_total": sum(int(r.get("shares") or 0) for r in rows if r.get("ok")),
         "updated": d.get("updated"),
     }
     for r in rows:                                    # 仓位占比
@@ -253,6 +259,57 @@ def add_trade(rec):
     items.sort(key=lambda x: (x["date"], x["id"]))
     _save_trades(items)
     return items[-1]
+
+
+_SMAP = {"key": None, "data": None}
+
+
+def _sellable_map_cache():
+    """60 秒缓存的可卖股数映射。"""
+    import os as _os
+    import time as _t
+    try:
+        tp = (globals().get("TRADES") or globals().get("TRADES_PATH")
+              or _os.path.join(BASE, "data", "real_trades.json"))
+        st = _os.stat(tp)
+        key = (st.st_mtime, st.st_size)
+    except OSError:
+        key = None
+    if _SMAP["data"] is not None and _SMAP["key"] == key:
+        return _SMAP["data"]
+    data = sellable_map()
+    _SMAP.update({"key": key, "data": data})
+    return data
+
+
+def sellable_map():
+    """按成交流水推算每只股票的"可卖股数"（今日买入的部分 T+1 不可卖）。
+
+    返回 {code: {"sellable": 股数, "total": 持股, "today_buy": 今日买入}}
+    """
+    from datetime import datetime as _dt
+    today = _dt.now().strftime("%Y-%m-%d")
+    out = {}
+    for t in (load_trades() or []):
+        code = str(t.get("code") or "")
+        if not code:
+            continue
+        sh = int(float(t.get("shares") or 0))
+        side = str(t.get("side") or "").upper()
+        d = str(t.get("date") or t.get("ts") or t.get("time") or "")[:10]
+        rec = out.setdefault(code, {"sellable": 0, "total": 0, "today_buy": 0})
+        if side == "BUY":
+            rec["total"] += sh
+            if d == today:
+                rec["today_buy"] += sh
+            else:
+                rec["sellable"] += sh
+        else:
+            rec["total"] -= sh
+            rec["sellable"] -= sh
+    for rec in out.values():
+        rec["sellable"] = max(0, min(rec["sellable"], rec["total"]))
+    return out
 
 
 def _held_shares(code):

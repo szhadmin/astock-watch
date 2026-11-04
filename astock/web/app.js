@@ -507,13 +507,22 @@ const App = (() => {
   function positionsHtml(ov) {
     const pos = ov.positions || [];
     if (!pos.length) return '<div class="dim">空仓中。AI 可以选择空仓，空仓也是一种决策。</div>';
-    return `<table><thead><tr><th>标的</th><th>股数</th><th>成本</th><th>现价</th><th>浮盈</th><th>止损</th><th>目标</th></tr></thead><tbody>
+    const totPnl = pos.reduce((a, p) => a + (p.pnl || 0), 0);
+    const totSh = pos.reduce((a, p) => a + (p.shares || 0), 0);
+    const totAv = pos.reduce((a, p) => a + (p.available || 0), 0);
+    return `<table><thead><tr><th>标的</th><th>总数量</th><th>可卖</th><th>成本</th><th>现价</th><th>盈亏(元)</th><th>止损</th><th>目标</th></tr></thead><tbody>
       ${pos.map(p => `<tr title="点击查看K线与AI买卖点" style="cursor:pointer" onclick="App.openKline('${p.code}')">
         <td class="l">${esc(p.name || '')} <span class="dim mono">${p.code}</span></td>
-        <td>${p.shares}</td><td>${n2(p.cost, 3)}</td><td>${n2(p.price)}</td>
-        <td class="${cls(p.pnl_pct)}">${pct(p.pnl_pct)}</td>
+        <td>${p.shares}</td>
+        <td class="${p.available ? '' : 'warn'}" title="今日买入的部分 T+1 不可卖">${p.available === undefined || p.available === null ? '--' : p.available}</td>
+        <td>${n2(p.cost, 3)}</td><td>${n2(p.price)}</td>
+        <td class="${cls(p.pnl)}">${p.pnl === undefined || p.pnl === null ? pct(p.pnl_pct)
+        : (p.pnl >= 0 ? '+' : '') + n2(p.pnl) + '（' + pct(p.pnl_pct) + '）'}</td>
         <td class="mono">${p.stop || '--'}</td><td class="mono">${p.target || '--'}</td></tr>`).join('')}
-      </tbody></table>`;
+      </tbody>
+      <tfoot><tr><td class="l dim">合计</td><td>${totSh}</td><td>${totAv}</td><td colspan="2"></td>
+        <td class="${cls(totPnl)}"><b>${totPnl >= 0 ? '+' : ''}${n2(totPnl)}</b></td>
+        <td colspan="2"></td></tr></tfoot></table>`;
   }
 
   function watchHtml(ov) {
@@ -1385,7 +1394,7 @@ const App = (() => {
       <div class="card"><h3>总市值</h3><div class="big ${cls(s.pnl)}">${money(s.total_mv)}</div>
         <div class="${cls(s.pnl)}">${s.pnl >= 0 ? '+' : ''}${money(s.pnl)} （${pct(s.pnl_pct)}）</div></div>
       <div class="card"><h3>持仓成本</h3><div class="big">${money(s.total_cost)}</div>
-        <div class="dim">${s.count} 只 · 仓位 ${n2(s.position_pct, 1)}%</div></div>
+        <div class="dim">${s.count} 只 · 仓位 ${n2(s.position_pct, 1)}% · 可卖 ${s.sellable_total === undefined ? '--' : s.sellable_total} 股</div></div>
       <div class="card"><h3>可用资金</h3><div class="big">${money(s.cash)}</div>
         <div class="dim">本金 ${money(s.capital)}</div></div>
       <div class="card"><h3>风险提示</h3>
@@ -1407,7 +1416,9 @@ const App = (() => {
         </div>
         <div class="grid g3" style="margin-top:8px">
           <div><div class="dim" style="font-size:12px">持仓</div>
-            <div>${r.shares}股 · 成本 ${n2(r.cost, 3)} · 市值 ${money(r.mv)}</div>
+            <div>总 <b>${r.shares}</b> 股 · 可卖 <b class="${r.sellable ? 'up' : 'warn'}">${r.sellable === undefined ? '--' : r.sellable}</b> 股</div>
+            <div class="dim" style="font-size:12px">成本 ${n2(r.cost, 3)} · 市值 ${money(r.mv)}</div>
+            <div class="${cls(r.pnl)}" style="font-size:12px">浮动盈亏 ${r.pnl >= 0 ? '+' : ''}${money(r.pnl)}（${pct(r.pnl_pct)}）</div>
             <div class="dim" style="font-size:12px">占持仓 ${n2(r.weight_pct, 1)}%</div></div>
           <div><div class="dim" style="font-size:12px">技术面</div>
             <div>评分 <b>${r.score}</b>／右侧 ${r.right} · 左侧 ${r.left} · 确认 ${r.checklist}/4</div>
