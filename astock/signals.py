@@ -366,7 +366,26 @@ def verdict_of(scores, stop_hit=False):
 # --------------------------------------------------------------------------- #
 # 主入口
 # --------------------------------------------------------------------------- #
-def build_report(code, cfg):
+def build_report(code, cfg=None, *args, **kwargs):
+    """带磁盘缓存的 build_report：同一天同一只票只算一次（结果落 SQLite）。"""
+    from datetime import datetime as _dt
+    try:
+        from . import diskcache
+    except Exception:
+        return _build_report_raw(code, cfg, *args, **kwargs)
+    key = "rep:%s:%s" % (code, _dt.now().strftime("%Y-%m-%d"))
+    hit = diskcache.get(key, ttl=600)
+    if hit is not None:
+        return hit
+    out = _build_report_raw(code, cfg, *args, **kwargs)
+    try:
+        diskcache.put(key, out)
+    except Exception:
+        pass
+    return out
+
+
+def _build_report_raw(code, cfg):
     code = str(code).strip()
     sym_cfg = (cfg.get("symbols") or {}).get(code, {}) or {}
     pos_cfg = (cfg.get("positions") or {}).get(code)

@@ -391,6 +391,7 @@ class Scheduler(threading.Thread):
     def run(self):
         while True:
             try:
+                _mem_guard()
                 self.tick()
             except Exception:
                 pass
@@ -771,12 +772,49 @@ _PA_CACHE = {"ts": 0.0, "data": None}
 PA_TTL = 120.0
 
 
+def _rss_mb():
+    """当前进程内存占用（MB）。"""
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * 4096 / 1048576.0
+    except Exception:
+        return 0.0
+
+
+MEM_LIMIT_MB = 700          # 超过这个值就主动清缓存，避免撞 1GB 硬上限被 OOM 杀
+
+
+def _mem_guard():
+    """内存看门狗：RSS 过高时清掉大缓存并 gc（防 OOM 导致 502）。"""
+    try:
+        rss = _rss_mb()
+        if rss < MEM_LIMIT_MB:
+            return
+        import gc
+        gc.collect()
+        try:
+            from . import hypothesis
+            hypothesis._CACHE.update({"key": None, "data": None})
+        except Exception:
+            pass
+        for cache in (_PA_CACHE, _RULES_CACHE):
+            try:
+                cache["ts"] = 0.0
+                cache["data"] = None
+            except Exception:
+                pass
+        print("[mem] RSS %.0fMB 超过阈值 %dMB → 已清理缓存并 gc，现 %.0fMB"
+              % (rss, MEM_LIMIT_MB, _rss_mb()))
+    except Exception:
+        pass
+
+
 def api_paper_analysis(_q):
     """AI 模拟盘持仓详情 + 逐只持仓分析（技术面 / 风控 / 建议）。"""
-    import time as _t
-    now = _t.time()
-    if _PA_CACHE["data"] and now - _PA_CACHE["ts"] < PA_TTL:
-        return _PA_CACHE["data"]
+    from . import diskcache
+    _hit = diskcache.get("paper_analysis", ttl=120)
+    if _hit is not None:
+        return _hit
     try:
         from . import signals as _sg
     except Exception:
@@ -844,7 +882,7 @@ def api_paper_analysis(_q):
                                        "market_value": snap.get("market_value"),
                                        "equity": snap.get("equity"),
                                        "total_return_pct": snap.get("total_return_pct")}}
-    _PA_CACHE.update({"ts": now, "data": out})
+    diskcache.put("paper_analysis", out)
     return out
 
 
@@ -1013,17 +1051,17 @@ RULES_TTL = 60.0
 
 def api_rules(_q):
     """经验规则库：生效/候选/淘汰 + 升格门槛（60 秒缓存，避免每次刷新都全量统计）。"""
-    import time as _t
-    now = _t.time()
-    if _RULES_CACHE["data"] and now - _RULES_CACHE["ts"] < RULES_TTL:
-        return _RULES_CACHE["data"]
+    from . import diskcache
+    _hit = diskcache.get("rules_summary", ttl=60)
+    if _hit is not None:
+        return _hit
     try:
         rules.link_from_hypotheses()
     except Exception:
         pass
     s = rules.summary()
     s["prompt_view"] = rules.active_for_prompt()
-    _RULES_CACHE.update({"ts": now, "data": s})
+    diskcache.put("rules_summary", s)
     return s
 
 
@@ -1575,6 +1613,8 @@ def serve(host="127.0.0.1", port=8770, scheduler=True, open_browser=False):
             pass
         hypdb.sync(verbose=True)
         hypdb.purge_older_than_days(730)
+        from . import diskcache as _dc
+        _dc.purge(86400 * 3, verbose=True)
     except Exception as exc:
         print("  （样本库同步失败：%s）" % exc)
     try:

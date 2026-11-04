@@ -102,10 +102,25 @@ def load_all(use_cache=True, include_replay=True):
 
 
 def _rewrite(items):
+    """重写主样本库。
+
+    注意：调用方可能传进来的是 load_all() 合并结果（含回放样本），
+    回放样本属于 REPLAY_PATH，绝不能写回主库——否则主库会被写成上百 MB，
+    读取时直接把容器内存打爆（这是历史上 502 的根因之一）。
+    """
     _ensure()
+    kept = 0
+    dropped = 0
     with open(PATH, "w", encoding="utf-8") as f:
         for it in items:
+            if (it.get("source") or "") == "replay":
+                dropped += 1
+                continue
             f.write(json.dumps(it, ensure_ascii=False) + "\n")
+            kept += 1
+    if dropped:
+        print("  ⓘ 主样本库防污染：丢弃 %d 条回放样本（它们属于回放库）" % dropped)
+    return kept
 
 
 def _norm_dir(action, advice=None):

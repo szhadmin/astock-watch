@@ -993,6 +993,22 @@ class AITrader:
         os.makedirs(PLANS_DIR, exist_ok=True)
         return os.path.join(PLANS_DIR, "pending_plans.json")
 
+    def _dedup_plans(self):
+        """同一代码+同一方向+同一信号日，只保留最早的一条（防重复下单）。"""
+        plans = self._load_plans()
+        seen = {}
+        out = []
+        for pl in plans:
+            key = (pl.get("code"), (pl.get("action") or "").upper(), pl.get("signal_date"))
+            if key in seen:
+                continue
+            seen[key] = True
+            out.append(pl)
+        if len(out) != len(plans):
+            self._save_plans(out)
+            print(color("  ⓘ 计划单去重：%d → %d 条" % (len(plans), len(out)), "yellow"))
+        return out
+
     def _load_plans(self):
         p = self._plans_path()
         if not os.path.exists(p):
