@@ -1440,6 +1440,7 @@ def serve(host="127.0.0.1", port=8770, scheduler=True, open_browser=False):
     try:                                   # 样本库增量同步进 SQLite
         from . import hypdb
         hypdb.sync(verbose=True)
+        hypdb.purge_older_than_days(730)
     except Exception as exc:
         print("  （样本库同步失败：%s）" % exc)
     try:

@@ -881,8 +881,9 @@ class AITrader:
                        "相对指数超额%": stats.get("excess_pct"),
                        **{k: v for k, v in stats.items() if k != "equity"}},
             "今日成交": today_trades,
-            "当前持仓": [{k: p[k] for k in ("code", "name", "shares", "cost", "price",
-                                          "pnl_pct", "entry_date", "stop", "note")}
+            "当前持仓": [{**{k: p[k] for k in ("code", "name", "shares", "cost", "price",
+                                            "pnl_pct", "entry_date", "stop", "note")},
+                        "可卖股数": p.get("available")}
                        for p in snap["positions"]],
             "最近决策记录": [{"date": d.get("date"), "view": d.get("market_view"),
                          "actions": [{k: a.get(k) for k in ("code", "action", "shares", "reason")}

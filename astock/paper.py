@@ -58,8 +58,20 @@ class PaperBroker:
                 p["available"] = p["shares"]
             self.save()
 
+    def _today(self):
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _available(self, pos):
+        """可卖股数：入场日早于今天即可卖（T+1）；同日买入为 0。"""
+        entry = pos.get("entry_date") or ""
+        today = self._today()
+        if entry and entry < today:
+            return int(pos["shares"])
+        return int(pos.get("available") or 0)
+
     def mark(self, prices):
         """按最新价估算市值与权益。prices: {code: price}"""
+        self.new_day()                        # 跨交易日解锁 T+1 冻结
         mv = 0.0
         detail = []
         for code, p in self.state["positions"].items():
@@ -68,7 +80,7 @@ class PaperBroker:
             val = p["shares"] * px
             mv += val
             detail.append({"code": code, "name": p.get("name", ""), "shares": p["shares"],
-                           "available": p.get("available", p["shares"]),
+                           "available": self._available(p),
                            "cost": p["cost"], "price": px,
                            "market_value": round(val, 2),
                            "pnl": round((px - p["cost"]) * p["shares"], 2),
@@ -84,6 +96,7 @@ class PaperBroker:
 
     # ---------------- 成交 ----------------
     def buy(self, code, price, shares, name="", stop=None, target=None, note=""):
+        self.new_day()
         shares = int(shares // 100 * 100)
         if shares <= 0:
             return False, "股数不足 1 手"
@@ -115,7 +128,7 @@ class PaperBroker:
         pos = self.state["positions"].get(code)
         if not pos:
             return False, "无持仓"
-        avail = pos.get("available", pos["shares"])
+        avail = self._available(pos)
         if avail <= 0:
             return False, "T+1 限制：今日买入不可卖出"
         shares = pos["shares"] if shares is None else min(int(shares // 100 * 100), avail)

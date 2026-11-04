@@ -150,6 +150,18 @@ def _q(sql, args=()):
         return conn.execute(sql, args).fetchall()
 
 
+def append(records):
+    """把一批样本直接写入 SQLite（回放边算边写，进程不攒内存）。"""
+    rows = [_row(d) for d in records]
+    if not rows:
+        return 0
+    with closing(connect()) as conn:
+        conn.executemany("INSERT OR IGNORE INTO hyps VALUES (%s)"
+                         % ",".join("?" * 26), rows)
+        conn.commit()
+    return len(rows)
+
+
 def has_data():
     """库里是否已有可用样本（供各接口决定是否走 SQL 路径）。"""
     try:
@@ -236,11 +248,16 @@ def rule_stats(cond, direction=None, forbid=False):
             "net": round(ret_eff - 0.3, 2), "stocks": stocks, "real": real or 0}
 
 
-def purge_older_than_days(days=400, verbose=False):
-    """只保留最近 N 天的样本（可选，控制库体积）。"""
+def purge_older_than_days(days=730, verbose=False):
+    """只保留最近 N 天的样本（默认 2 年），返回清理条数。"""
     with closing(connect()) as conn:
-        conn.execute("DELETE FROM hyps WHERE date < date('now', ?)", ("-%d days" % days,))
+        cur = conn.execute("DELETE FROM hyps WHERE date IS NOT NULL AND date < date('now', ?)",
+                           ("-%d days" % days,))
+        n = cur.rowcount
         conn.commit()
+    if verbose:
+        print("  SQLite 保留策略：清除 %d 条早于 %d 天的样本" % (n, days))
+    return n
 
 
 if __name__ == "__main__":

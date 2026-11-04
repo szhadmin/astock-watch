@@ -249,6 +249,47 @@ def _existing_keys():
     return keys
 
 
+RETAIN_DAYS = 730          # 样本只保留最近 2 年
+
+
+def _append_recs(recs):
+    """一批样本立刻落盘（jsonl 存档 + SQLite），不在内存里攒。"""
+    os.makedirs(os.path.dirname(PATH), exist_ok=True)
+    with open(PATH, "a", encoding="utf-8") as f:
+        for r in recs:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    try:
+        from . import hypdb
+        hypdb.append(recs)
+    except Exception:
+        pass
+
+
+def _prune_jsonl(days=RETAIN_DAYS):
+    """把超过 N 天的样本从 jsonl 剔除（流式重写，内存恒定），返回条数。"""
+    import datetime as _dt
+    cutoff = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
+    if not os.path.exists(PATH):
+        return 0
+    tmp = PATH + ".tmp"
+    removed = 0
+    with open(PATH, encoding="utf-8-sig") as src, open(tmp, "w", encoding="utf-8") as dst:
+        for line in src:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if (d.get("date") or "") >= cutoff:
+                dst.write(json.dumps(d, ensure_ascii=False) + "\n")
+            else:
+                removed += 1
+    os.replace(tmp, PATH)
+    return removed
+
+
 def run(codes=None, days=250, max_codes=30, verbose=True, cfg=None):
     """批量回放：默认取候选池/观察池的股票。"""
     if not codes:
@@ -281,7 +322,12 @@ def run(codes=None, days=250, max_codes=30, verbose=True, cfg=None):
         if verbose and before != len(codes):
             print("续跑模式：跳过已回放的 %d 只，本轮处理 %d 只"
                   % (before - len(codes), len(codes)))
-    all_recs, stats = [], []
+    stats = []
+    total_new = 0
+    n_bull = 0
+    n_hits = 0
+    exc_sum = 0.0
+    exc_n = 0
     t0 = time.time()
     for idx, code in enumerate(codes, 1):
         bars = None
@@ -299,35 +345,44 @@ def run(codes=None, days=250, max_codes=30, verbose=True, cfg=None):
         recs, st = replay_code(code, bars, temp_map, verbose=verbose,
                                idx_map=idx_map, regime_map=regime_map)
         recs = [r for r in recs if ("replay", r["code"], r["date"]) not in keys]
-        all_recs.extend(recs)
+        if recs:
+            _append_recs(recs)                  # 边算边写，不占内存
+            total_new += len(recs)
+            n_bull += sum(1 for r in recs if r["direction"] == "bullish")
+            n_hits += sum(1 for r in recs if r["result"]["hit"])
+            for r in recs:
+                e = r["result"].get("excess")
+                if e is not None:
+                    exc_sum += e
+                    exc_n += 1
         stats.append(st)
         if verbose and (idx % 10 == 0 or idx == len(codes)):
             used = time.time() - t0
             eta = used / idx * (len(codes) - idx)
             print("  进度 %d/%d｜样本 %d｜已用 %.0fs｜预计剩余 %.0fs"
-                  % (idx, len(codes), len(all_recs), used, eta))
-        if len(all_recs) >= 60000:                   # 单次上限，防内存爆炸
+                  % (idx, len(codes), total_new, used, eta))
+        if total_new >= 60000:                   # 单次上限，防内存爆炸
             if verbose:
                 print("  已达单次上限 60000 条，停止本轮（可再跑下一批）")
             break
-    if all_recs:
-        os.makedirs(os.path.dirname(PATH), exist_ok=True)
-        with open(PATH, "a", encoding="utf-8") as f:
-            for r in all_recs:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
     if verbose:
-        bull = len([r for r in all_recs if r["direction"] == "bullish"])
-        bear = len(all_recs) - bull
-        hits = len([r for r in all_recs if r["result"]["hit"]])
-        excs = [r["result"].get("excess") for r in all_recs
-                if r["result"].get("excess") is not None]
         msg = ("\n回放完成：%d 只股票 → 新增样本 %d 条（看涨 %d / 看跌 %d），命中 %d 条（%.1f%%）"
-               % (len(stats), len(all_recs), bull, bear, hits,
-                  (hits / len(all_recs) * 100) if all_recs else 0))
-        if excs:
-            msg += "\n  扣 beta 后：平均超额 %+.2f%%（相对上证指数）" % (sum(excs) / len(excs))
+               % (len(stats), total_new, n_bull, total_new - n_bull, n_hits,
+                  (n_hits / total_new * 100) if total_new else 0))
+        if exc_n:
+            msg += "\n  扣 beta 后：平均超额 %+.2f%%（相对上证指数）" % (exc_sum / exc_n)
         print(msg)
-    return {"codes": len(stats), "new_samples": len(all_recs), "stats": stats}
+    try:                                        # 样本保留：只留最近 RETAIN_DAYS 天
+        from . import hypdb
+        pruned_db = hypdb.purge_older_than_days(RETAIN_DAYS)
+        pruned_jsonl = _prune_jsonl(RETAIN_DAYS)
+        if verbose:
+            print("  保留策略（最近 %d 天）：清理 db %d 条 / jsonl %d 条"
+                  % (RETAIN_DAYS, pruned_db, pruned_jsonl))
+    except Exception as exc:                     # noqa: BLE001
+        if verbose:
+            print("  保留策略执行失败：%s" % exc)
+    return {"codes": len(stats), "new_samples": total_new, "stats": stats}
 
 
 def _top_by_amount(n):
