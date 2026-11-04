@@ -16,6 +16,8 @@ services:
         PIP_INDEX_URL: "https://pypi.tuna.tsinghua.edu.cn/simple"
     image: astock-watch:latest
     container_name: astock-core
+    mem_limit: 1536m        # 容器内存上限（曾多次 OOM → 502）
+    memswap_limit: 2g
     restart: unless-stopped
 
     ports:

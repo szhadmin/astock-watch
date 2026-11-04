@@ -773,17 +773,21 @@ class AITrader:
         except Exception as exc:
             print(color("  （持仓建议保存失败：%s）" % exc, "yellow"))
         acts = data.get("actions") or []
-        if not any((a.get("action") or "").upper() == "BUY" for a in acts):
-            try:
-                trial = self._trial_candidate(watch, day, snap)
-                if trial:
-                    acts.append(trial)
+        try:
+            _ai = (self.cfg.get("ai") or {}) if isinstance(self.cfg, dict) else {}
+            need = int(_ai.get("plan_target_count") or 3)
+            have = [x for x in acts if (x.get("action") or "").upper() == "BUY"]
+            if len(have) < need:
+                extra = self._trial_candidates(watch, day, snap, need=need - len(have))
+                if extra:
+                    acts.extend(extra)
                     data["actions"] = acts
-                    print(color("  ⓘ 均衡档：AI 未主动开仓 → 代码补 1 只试错仓 %s（%d 股 @%.2f，止损 %.2f）"
-                                % (trial["code"], trial["shares"], trial["limit_price"], trial["stop"]),
+                    print(color("  ⓘ 计划补足：AI 给了 %d 只买入，代码补 %d 只试错仓 → %s"
+                                % (len(have), len(extra),
+                                   "、".join("%s(%d股)" % (x["code"], x["shares"]) for x in extra)),
                                 "yellow"))
-            except Exception as exc:                       # noqa: BLE001
-                print(color("  （试错仓判定失败：%s）" % exc, "grey"))
+        except Exception as exc:                       # noqa: BLE001
+            print(color("  （试错仓判定失败：%s）" % exc, "grey"))
         results = self._execute(acts, snap, watch, day)
         memory.append_journal(
             "【操盘】%s\n%s\n执行：%s" % (view, data.get("journal", ""),
@@ -798,18 +802,34 @@ class AITrader:
                                   extra={"index": self._index_close()})
         return data
 
-    def _trial_candidate(self, watch, day, snap=None):
-        """均衡档强制参与：挑 1 只满足硬条件的标的做试错仓。
+    def _trial_candidates(self, watch, day, snap=None, need=3):
+        """均衡/积极档强制参与：挑出 need 只满足硬条件的试错仓。
 
-        准入（代码判定，不给模型自由裁量）：
-          评分 ≥50、评分变化 ≥-6、板块不弱势、止损距离 ≤8%、
-          单笔风险 ≤ 风控上限、组合预算有余量、当日交易笔数未满。
+        准入（代码判定）：评分 ≥ trial_min_score、评分变化 ≥ trial_min_score_chg、
+        板块不弱势、止损距离 ≤8%、单笔风险 ≤ 均分后的剩余预算、现金买得起一手。
+        风险预算按「本次还需几只」均分，保证 3 只都能落地而不互相挤占。
         """
         ai = (self.cfg.get("ai") or {}) if isinstance(self.cfg, dict) else {}
-        if str(ai.get("participation") or "balanced").lower() != "balanced":
-            return None
-        c = self.rails.cfg
-        best = None
+        level = str(ai.get("participation") or "balanced").lower()
+        if level == "conservative":
+            return []
+        if level == "aggressive":
+            need = max(need, int(ai.get("plan_target_count") or 3))
+        c = self.rails.cfg or {}
+        snap = snap or {}
+        equity = float(snap.get("equity") or 0)
+        cash = float(snap.get("cash") or 0)
+        budget_total = equity * float(c.get("max_total_risk_pct") or 4.0) / 100
+        used = 0.0
+        for p_ in snap.get("positions") or []:
+            st = p_.get("stop")
+            px_ = p_.get("price") or p_.get("last_price") or 0
+            if st and px_:
+                used += max(0.0, (float(px_) - float(st))) * int(p_.get("shares") or 0)
+        remain = max(0.0, budget_total - used)
+        if remain <= 0 or need <= 0:
+            return []
+        cands = []
         for it in watch or []:
             code = it.get("code")
             px = it.get("现价") or it.get("price")
@@ -817,48 +837,51 @@ class AITrader:
             chg = it.get("评分变化")
             if not code or not px:
                 continue
-            if sc is None or sc < float(ai.get("trial_min_score", 50)):
-                continue
-            if chg is not None and chg < float(ai.get("trial_min_score_chg", -6)):
-                continue
             if it.get("⚠板块"):
                 continue
-            # 止损：优先用近 20 日支撑，其次 -5.5%
-            stop = None
+            if sc is None or float(sc) < float(ai.get("trial_min_score", 50)):
+                continue
+            if chg is not None and float(chg) < float(ai.get("trial_min_score_chg", -6)):
+                continue
+            cands.append((float(sc) * 10 + float(chg or 0), str(code), it))
+        cands.sort(key=lambda x: -x[0])
+        out = []
+        for _k, code, it in cands:
+            if len(out) >= need:
+                break
+            px = float(it.get("现价") or it.get("price") or 0)
+            lot = 200 if code.startswith(("688", "689")) else 100
+            room = remain / max(1, need - len(out))
+            sup = it.get("近20日支撑") or it.get("support20")
             try:
-                sup = (it.get("近20日支撑") or it.get("support20"))
-                stop = float(sup) if sup else None
+                stop = float(sup) if sup else px * 0.955
             except Exception:
-                stop = None
-            if not stop or stop >= px or (px - stop) / px > 0.08:
-                stop = round(px * 0.945, 2)
-            if (px - stop) / px > 0.08:
+                stop = px * 0.955
+            if stop >= px or (px - stop) / px > 0.08:
+                stop = round(px * 0.955, 2)
+            max_dist = min(0.08, max(0.015, room / (px * lot)))
+            if (px - stop) / px > max_dist:
+                stop = round(px * (1 - max_dist), 2)
+            stop = round(float(stop), 2)          # 价格统一两位小数
+            if stop >= px:
                 continue
-            dev = (px - stop) / px * 100
-            if dev <= 0:
+            risk_ps = px - stop
+            max_by_risk = int(room / (risk_ps * lot)) * lot
+            cash_budget = min(cash, equity * float(ai.get("trial_max_pct", 15)) / 100 * need)
+            max_by_cash = int((cash_budget / px) // lot * lot) if px else 0
+            shares = min(int(ai.get("trial_shares", 200)), max_by_risk, max_by_cash)
+            shares = int(shares // lot * lot)
+            if shares < lot:
                 continue
-            key = (sc or 0) * 10 + (chg or 0)
-            # 买得起吗？按其最小手数算：买不起就跳过，别选到买不起的票
-            lot_i = 200 if str(code).startswith(("688", "689")) else 100
-            cash_i = float((snap or {}).get("cash") or 0)
-            eq_i = float((snap or {}).get("equity") or 0) or cash_i
-            budget_i = min(cash_i * 0.95,
-                           eq_i * float(ai.get("trial_max_pct", 15)) / 100)
-            if lot_i * px > budget_i:
-                continue
-            if best is None or key > best[0]:
-                best = (key, code, it.get("name") or "", px, stop, sc, chg, lot_i, budget_i)
-        if not best:
-            return None
-        _k, code, name, px, stop, sc, chg, lot, budget = best
-        max_by_cash = int(budget / px // lot * lot)
-        shares = min(int(ai.get("trial_shares", 200)), max_by_cash)
-        if shares < lot:
-            return None
-        return {"code": code, "name": name, "action": "BUY", "shares": shares,
-                "limit_price": round(px, 3), "stop": stop,
-                "reason": ("均衡档试错仓（代码强制参与）：评分 %s、评分变化 %s、"
-                           "止损 %.2f（距离 %.1f%%）、小仓 %d 股" % (sc, chg, stop, dev, shares))}
+            cash -= shares * px
+            remain -= risk_ps * shares
+            out.append({"code": code, "name": it.get("name") or "", "action": "BUY",
+                        "shares": shares, "limit_price": round(px, 3), "stop": stop,
+                        "reason": ("均衡档试错仓（代码强制参与）：评分 %s、变化 %s、"
+                                   "止损 %.2f（%.1f%%）、%d 股"
+                                   % (it.get("评分"), it.get("评分变化"), stop,
+                                      (px - stop) / px * 100, shares))})
+        return out
 
     def _execute(self, actions, snap, watch, day):
         allowed_codes = {p["code"] for p in snap["positions"]} | set(self.watchlist) \
