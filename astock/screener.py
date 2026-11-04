@@ -40,6 +40,7 @@ DEFAULT_SCREEN = {
     "breakout_max_scan": 25,    # 突破通道最多读多少只 K 线
     "rotation_boards": 5,       # 板块轮动：取强度榜前 N 个板块
     "rotation_per_board": 3,    # 每个板块取几只
+    "rotation_max_scan": 15,    # 轮动通道最多给多少只补 K 线特征（其余只给行情）
     "min_per_channel": {"breakout": 5, "rotation": 5},   # 各通道保底名额（防被低吸通道挤掉）
     # 各通道的仓位系数（喂给 sizing / 风控）
     "pos_factor": {"dip": 1.0, "breakout": 0.5, "rotation": 0.7},
@@ -332,6 +333,7 @@ def screen(cfg_screen=None, verbose=True):
             per = int(sc["rotation_per_board"])
             boards = _board_top(nboards)
             got = 0
+            _budget = [int(sc.get("rotation_max_scan") or 15)]
             for b in boards:
                 if not b.get("code"):
                     continue
@@ -348,9 +350,30 @@ def screen(cfg_screen=None, verbose=True):
                         continue
                     if (m.get("amount") or 0) / 1e8 < sc["min_amount_yi"]:
                         continue
+                    _pf = float((sc.get("pos_factor") or {}).get("rotation", 0.7))
+                    if _budget[0] > 0:              # 优先补 K 线：AI 需要均线/止损位才能下单
+                        _bars = None
+                        try:
+                            _bars = feed.get_kline(m["code"], 101, limit=90, adjust=1)
+                        except Exception:
+                            _bars = None
+                        if _bars and len(_bars) >= 70:
+                            _budget[0] -= 1
+                            f = features(m["code"], m["name"], m, _bars)
+                            f["channel"] = "rotation"
+                            f["pos_factor"] = _pf
+                            f["category"] = (f.get("category") or "") + "｜板块强势(%s)" % b["name"]
+                            f["sector"] = b["name"]
+                            f["sector_pct"] = b.get("pct")
+                            f["screen_score"] = round((f.get("screen_score") or 0) + 8, 1)
+                            feats.append(f)
+                            got += 1
+                            picked += 1
+                            if picked >= per:
+                                break
+                            continue
                     feats.append(_quote_feat(m, "rotation", sector=b["name"],
-                                             sector_pct=b.get("pct"),
-                                             pos_factor=float((sc.get("pos_factor") or {}).get("rotation", 0.7))))
+                                             sector_pct=b.get("pct"), pos_factor=_pf))
                     got += 1
                     picked += 1
                     if picked >= per:

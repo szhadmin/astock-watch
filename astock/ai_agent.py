@@ -59,6 +59,27 @@ DEFAULT_EXEC = {
     "cancel_if_gap_pct": 1.5,        # 次日高开超过该幅度则取消买入计划
 }
 
+def _idle_state():
+    """统计连续多少个交易日没有开新仓，并给出"别把空仓当纪律"的提醒。"""
+    try:
+        import json as _j
+        with open(os.path.join(BASE, "data", "ai", "paper_state.json"), encoding="utf-8-sig") as f:
+            st = _j.load(f)
+        trades = st.get("trades") or []
+        buys = [t for t in trades if (t.get("side") or "").upper() == "BUY"]
+        if not buys:
+            return {"连续未开仓交易日": None, "提示": "还没有买入记录"}
+        last = (buys[-1].get("ts") or "")[:10]
+        gap = (datetime.now() - datetime.strptime(last, "%Y-%m-%d")).days
+        tip = ""
+        if gap >= 1:
+            tip = ("已连续 %d 个自然日没有开新仓。空仓本身不是纪律，"
+                   "只有在没有合格标的时才是。若候选池里有符合手册的票，应当给出买入计划。" % gap)
+        return {"上次买入": last, "连续未开仓交易日": gap, "提示": tip}
+    except Exception as exc:                       # noqa: BLE001
+        return {"提示": "读取失败：%s" % exc}
+
+
 def _failures_brief():
     try:
         from . import failures
@@ -416,15 +437,27 @@ class AITrader:
             "task": "pick",
             "date": datetime.now().strftime("%Y-%m-%d"),
             "market": self._market_brief(),
+            "手动授权说明": ("若今日决策记录中出现「用户手动授权开仓」标记，"
+                              "那是用户在网页上主动点的强制开仓，属于用户指令，"
+                              "不得计入你自己的流程违规，也不要在教训里写成'情绪追涨'；"
+                              "只记录客观结果与可复用条件。"),
             "我的策略手册": memory.read_playbook()[:2500],
             "近期日记": memory.recent_journal(3, 1200),
             "当前持仓": [{"code": p["code"], "浮动盈亏%": p["pnl_pct"]} for p in snap["positions"]],
             "候选池(规则初筛后)": briefs,
             "要求": {
                 "输出JSON": {"market_view": "一句话概括今日市场",
-                          "watchlist": ["6位股票代码，最多5只"],
-                          "reason": "为什么选它们（结合手册与形态）"},
-                "原则": "只选你愿意在明确止损位下买入的票；宁缺毋滥；可只选1-2只或空仓。",
+                          "watchlist": ["6位股票代码，3~8 只，按吸引力排序"],
+                          "picks": [{"code": "6位代码", "关注点": "一句话：形态/位置/量能",
+                                     "参考止损": "价格", "优先度": "高|中|低"}],
+                          "reason": "为什么是这几只（结合手册与形态）"},
+                "原则": [
+                    "「选股会」产出的是**观察池**，不是下单指令——下单在后面的操盘决策里决定。",
+                    "因此你必须从候选池里挑 3~8 只最值得跟踪的票，而不是直接判断'今天买不买'。",
+                    "「市场过热/追高性价比低」不能成为不给候选的理由：过热恰恰说明要跟踪谁最强。",
+                    "只有在候选池里全部不符合任何形态（突破/回踩/超跌/放量）时才允许少于 3 只，并说明原因。",
+                    "每只都要给出参考止损位，便于后续决策直接使用。",
+                ],
             },
         }
         user = json.dumps(payload, ensure_ascii=False)
@@ -440,11 +473,15 @@ class AITrader:
             return None
         codes = [c for c in (data.get("watchlist") or []) if str(c).isdigit() and len(str(c)) == 6]
         allowed = {f["code"] for f in feats}
-        codes = [c for c in codes if c in allowed][:5]
+        codes = [c for c in codes if c in allowed][:8]
         self._log_output("pick", text, usage)
         if not codes:
-            print(color("  AI 今日选择空仓/未给出标的：%s" % (data.get("market_view") or ""), "yellow"))
-            self._save_watchlist([], {"market_view": data.get("market_view")})
+            # 兜底：AI 没给标的时，用规则候选的前若干只填池，保证决策阶段有票可看
+            fallback = [f["code"] for f in feats[:10]]
+            print(color("  AI 未给出标的（%s）→ 用规则候选兜底写入观察池 %d 只"
+                        % (data.get("market_view") or "", len(fallback)), "yellow"))
+            self._save_watchlist(fallback, {"market_view": data.get("market_view"),
+                                            "fallback": "screener", "ai_pick": []})
         else:
             self._save_watchlist(codes, {"market_view": data.get("market_view"),
                                          "reason": data.get("reason")})
@@ -625,6 +662,12 @@ class AITrader:
                      "建议要务实可执行、必须有触发价，不许说\"视情况而定\"。"
                      "这些是对真人账户的建议，不是模拟盘下单，不要和 actions 混在一起。"),
             "待执行计划单(昨日收盘时定下，今日开盘按规则执行)": self._load_plans(),
+            "关于「计划单为空」": ("计划单为空只代表昨天没有触发信号，"
+                             "绝不等于今天禁止开仓。只要有候选池/观察池里符合手册的标的，"
+                             "就应当正常给出 BUY 并落为计划单。"
+                             "禁止用「昨日计划单为空」作为不开仓的理由——那会形成"
+                             "『不开仓→计划单空→更不开仓』的死循环，属于系统性错失。"),
+            "开仓节奏(代码统计)": _idle_state(),
             "持仓": positions,
             "观察池": watch,
             "要求": {
@@ -754,6 +797,9 @@ class AITrader:
                 print(color("  ✘ " + msg, "green"))
                 results.append(msg)
                 continue
+            if act == "BUY" and day.get("force_open"):
+                reason = ("【用户手动授权开仓】" + (reason or ""))[:120]
+                a["reason"] = reason
             if act == "HOLD":
                 held = code in {p["code"] for p in snap["positions"]}
                 msg = ("持有 %s：%s" if held else "观望 %s（无持仓）：%s") % (code, reason)
@@ -954,6 +1000,10 @@ class AITrader:
                         % len(judgment_rows), "grey"))
         payload = {
             "task": "review",
+            "手动授权说明": ("若今日决策/成交记录里出现「【用户手动授权开仓】」标记，"
+                        "那是用户在网页上主动点的强制开仓，属于用户指令，"
+                        "不得计入你的流程违规，也不得写成'情绪追涨'；"
+                        "只记录客观结果与可复用条件。"),
             "date": today,
             "账户与绩效": {"总权益": snap["equity"], "累计收益%": snap["total_return_pct"],
                        "同期指数%": stats.get("index_return_pct"),

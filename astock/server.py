@@ -155,7 +155,8 @@ JOB_LOCK = threading.Lock()
 MAX_CONCURRENT = 4
 
 ACCOUNT_LOCK = threading.Lock()          # 会改持仓/现金的任务必须串行
-ACCOUNT_KINDS = ("decide", "execute", "auto", "force")
+ACCOUNT_KINDS = ("decide", "execute", "auto", "force",
+                 "pick", "plan", "review")   # 都会写数据/烧模型，必须串行
 _TL = threading.local()
 
 
