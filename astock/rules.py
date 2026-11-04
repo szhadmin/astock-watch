@@ -217,8 +217,57 @@ def _match(cond, ctx):
     return v < cond["value"] if cond["op"] == "<" else v > cond["value"]
 
 
+def _link_sql(verbose=False):
+    """SQL 版统计：内存恒定，速度只跟索引有关。"""
+    from . import hypdb
+    d = load()
+    changed = []
+    now = datetime.now().strftime("%Y-%m-%d")
+    for r in d["rules"]:
+        cond = r.get("cond")
+        if not cond:
+            continue
+        forbid = any(k in (r.get("动作") or "") for k in ("不买", "不追", "禁止", "空仓", "观望"))
+        st = hypdb.rule_stats(cond, r.get("方向"), forbid=forbid)
+        if not st:
+            continue
+        r["样本数"] = st["n"]
+        r["命中"] = int(round(st["hit"] / 100 * st["n"]))
+        r["命中率"] = st["hit"]
+        r["期望收益%"] = st["avg"]
+        r["净期望%"] = st["net"]
+        r["覆盖股票数"] = st["stocks"]
+        r["实盘样本数"] = st["real"]
+        r["回放样本数"] = st["n"] - st["real"]
+        r["最近验证"] = now
+        old = r["状态"]
+        enough = r["实盘样本数"] >= MIN_SAMPLES or r["回放样本数"] >= MIN_SAMPLES
+        if enough and r["覆盖股票数"] >= MIN_STOCKS \
+                and r["命中率"] >= MIN_HIT_RATE and r["净期望%"] >= MIN_NET_EXPECT:
+            r["状态"] = "生效"
+        elif enough and r["净期望%"] < 0:
+            r["状态"] = "淘汰"
+        elif r["状态"] in ("生效", "淘汰"):
+            r["状态"] = "候选"
+        if old != r["状态"]:
+            changed.append({"id": r["id"], "from": old, "to": r["状态"],
+                            "条件": r["条件"][:50]})
+    save(d)
+    if verbose:
+        print("  SQL 统计完成：%d 条规则已更新，状态变更 %d 条"
+              % (len([x for x in d["rules"] if x.get("cond")]), len(changed)))
+    return {"changed": changed, "closed": hypdb.overview()["closed"]}
+
+
 def link_from_hypotheses(hypotheses=None, verbose=False):
     """拿已结算的判断样本，算每条可机读规则的 样本/命中率/期望，并升格或淘汰。"""
+    if hypotheses is None:
+        try:                                  # 优先走 SQLite（内存恒定）
+            from . import hypdb
+            if hypdb.has_data():
+                return _link_sql(verbose)
+        except Exception:
+            pass
     from . import hypothesis as hypo
     items = hypotheses if hypotheses is not None else hypo.load_all()
     closed = [x for x in items if x.get("result")]

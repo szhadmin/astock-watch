@@ -840,7 +840,28 @@ def _holdings_advice():
 
 
 def api_lab(_q):
-    """研究台：特征分层（评分/温度/持有期/市场状态/新特征）。"""
+    """研究台：特征分层（优先走 SQLite 聚合，内存恒定）。"""
+    try:
+        from . import hypdb
+        if hypdb.has_data():
+            ov = hypdb.overview()
+            return {
+                "samples": ov["closed"], "stocks": len({r[0] for r in hypdb._q(
+                    "SELECT DISTINCT code FROM hyps")}),
+                "range": list(hypdb._q("SELECT MIN(date), MAX(date) FROM hyps")[0]),
+                "baseline": {"avg": round((hypdb._q(
+                    "SELECT AVG(COALESCE(excess,end_ret)) FROM hyps WHERE hit IS NOT NULL")[0][0] or 0), 2)},
+                "score": hypdb.buckets("score", [(0, 40), (40, 50), (50, 60), (60, 70), (70, 101)]),
+                "temp": hypdb.buckets("temp", [(0, 25), (25, 40), (40, 60), (60, 75), (75, 101)]),
+                "horizon": hypdb.horizon_stats(),
+                "states": hypdb.state_stats(),
+                "regime": hypdb.regime_stats(),
+                "features": {"评分变化率": hypdb.buckets(
+                    "score_chg", [(-999, -5), (-5, 0), (0, 5), (5, 999)])},
+                "source": "sqlite",
+            }
+    except Exception as exc:                          # noqa: BLE001
+        print("  （SQLite 分层失败，回退 jsonl：%s）" % exc)
     try:
         rows = lab.load()
         if not rows:
@@ -1416,6 +1437,11 @@ def serve(host="127.0.0.1", port=8770, scheduler=True, open_browser=False):
     global SCHEDULER
     install_log_router()
     memory.ensure_dirs()
+    try:                                   # 样本库增量同步进 SQLite
+        from . import hypdb
+        hypdb.sync(verbose=True)
+    except Exception as exc:
+        print("  （样本库同步失败：%s）" % exc)
     try:
         backup.make_backup("server-start")
     except Exception:
