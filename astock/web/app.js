@@ -596,20 +596,48 @@ const App = (() => {
       </tbody></table>`;
   }
 
-  function plansHtml(ov) {
-    const plans = ov.plans || [];
-    if (!plans.length) return '<div class="dim">无待执行计划单。收盘后的决策会存为计划单、次日开盘才成交（避免用收盘价事后偷价）。</div>';
-    return `<table><thead><tr><th>标的</th><th>方向</th><th>股数</th><th>信号价</th><th>止损</th><th>信号时间</th></tr></thead><tbody>
-      ${plans.map(p => `<tr title="点击查看K线" style="cursor:pointer" onclick="App.openKline('${p.code}')">
+  function planRows(items) {
+    return `<table><thead><tr><th>标的</th><th>股数</th><th>信号价</th><th>止损</th><th>执行日</th><th>理由</th></tr></thead><tbody>
+      ${items.map(p => `<tr title="点击查看K线" style="cursor:pointer" onclick="App.openKline('${p.code}')">
         <td class="l">${esc(p.name || '')} <span class="dim mono">${p.code}</span></td>
-        <td class="${p.action === 'BUY' ? 'up' : 'down'}">${p.action === 'BUY' ? '买入' : '卖出'}</td>
         <td>${p.shares}</td><td>${n2(p.signal_price, 3)}</td>
         <td class="mono">${p.stop || '--'}</td>
-        <td class="dim mono" style="font-size:12px">${esc(p.signal_time || '')}</td></tr>`).join('')}
-      </tbody></table>
-      <div class="row" style="margin-top:10px">
+        <td class="dim mono" style="font-size:12px">${esc(p.for_date || p.signal_date || '')} ${esc(p.signal_time || '')}</td>
+        <td class="l" style="font-size:12px">${esc(p.reason || '')}</td></tr>`).join('')}
+      </tbody></table>`;
+  }
+
+  function plansHtml(ov) {
+    const plans = ov.plans || [];
+    const up = p => (p.action || '').toUpperCase() === 'BUY';
+    const buys = plans.filter(up), sells = plans.filter(p => !up(p));
+    const mode = `<div class="dim" style="font-size:12px;margin-bottom:6px">
+      ${esc(ov.hold_mode_label || '短线')}模式 · 单票最多持有 ${ov.hold_max_days || 3} 个交易日（到期由代码强制卖出）</div>`;
+    const btn = `<div class="row" style="margin-top:10px">
         <button class="btn primary" onclick="App.run('execute')">立即尝试执行</button>
         <span class="dim" style="font-size:12px">高开 &gt;1.5% 或跳空跌破止损则自动取消</span></div>`;
+    if (!plans.length) return mode + '<div class="dim">当前没有买卖计划单。收盘后的决策会存为计划单、到执行日开盘才成交（避免用收盘价事后偷价）。买卖都为空＝今天的决策是「明天不动作」，不是漏跑。</div>' + btn;
+    const block = (items, title, tone) => !items.length ? '' :
+      `<div style="margin-top:8px">
+         <div style="font-size:12px;margin-bottom:4px"><span class="${tone}">■</span> ${title}（${items.length} 条）</div>
+         ${planRows(items)}</div>`;
+    return mode + block(sells, '卖出计划（先处理持仓）', 'down') + block(buys, '买入计划（次日开仓）', 'up') + btn;
+  }
+
+  function watchNextHtml(ov) {
+    const w = ov.watch_next || {};
+    const its = w.items || [];
+    const head = w.for_date
+      ? `<div class="dim" style="font-size:12px;margin-bottom:6px">看好执行日 ${esc(w.for_date)} · 生成于 ${esc(w.generated || '')} · ${esc(ov.hold_mode_label || '短线')}模式</div>`
+      : '';
+    if (!its.length) return '<div class="dim">还没有「明日关注」清单。收盘后（15:15 计划阶段）AI 会把明天最看好的几只 + 触发条件写在这里；没有＝今天没找到值得盯的票。</div>';
+    return head + `<table><thead><tr><th>标的</th><th>优先级</th><th>关注理由</th><th>触发条件（明天看到就执行）</th></tr></thead><tbody>
+      ${its.map(i => `<tr title="点击查看K线" style="cursor:pointer" onclick="App.openKline('${i.code}')">
+        <td class="l">${esc(i.name || '')} <span class="dim mono">${i.code}</span></td>
+        <td class="${i.priority === '高' ? 'up' : ''}">${esc(i.priority || '-')}</td>
+        <td class="l" style="font-size:12px">${esc(i.reason || '')}</td>
+        <td class="l" style="font-size:12px">${esc(i.trigger || '')}</td></tr>`).join('')}
+      </tbody></table>`;
   }
 
   function railsHtml(ov) {
@@ -662,9 +690,11 @@ const App = (() => {
       </div>
       <div class="grid g2" style="margin-top:14px">
         <div class="card"><h3>AI 观察池</h3><div id="watch-card-body">${watchHtml(ov)}</div></div>
-        <div class="card"><h3>待执行计划单 <span class="dim" style="font-weight:400">（收盘后决策 → 次日开盘执行）</span></h3>
+        <div class="card"><h3>买卖计划单 <span class="dim" style="font-weight:400">（收盘后决策 → 执行日开盘执行）</span></h3>
           <div id="plans-card-body">${plansHtml(ov)}</div></div>
       </div>
+      <div class="card" style="margin-top:14px"><h3>明日待观察 / 看好名单 <span class="dim" style="font-weight:400">（AI 收盘后给出的次日关注清单 + 触发条件，买不买看触发）</span></h3>
+        <div id="watchnext-card-body">${watchNextHtml(ov)}</div></div>
       <div class="card" style="margin-top:14px"><h3>硬风控红线（AI 不可越过）</h3>
         <div id="rails-card-body">${railsHtml(ov)}</div></div>`;
   }
@@ -685,6 +715,7 @@ const App = (() => {
       loadLearning();
     setHtml('watch-card-body', watchHtml(ov));
     setHtml('plans-card-body', plansHtml(ov));
+    setHtml('watchnext-card-body', watchNextHtml(ov));
     setHtml('rails-card-body', railsHtml(ov));
     loadMyHoldDashboard();
     const flash = $('view');
@@ -1942,6 +1973,14 @@ const App = (() => {
     showDoc('历史版本 · ' + name, d.content || '(空)');
   }
 
+  async function setHoldMode(m) {
+    try {
+      const r = await post('/api/hold_mode', { mode: m });
+      toast('已切换为「' + r.label + '」：单票最多持有 ' + r.max_hold_days + ' 个交易日');
+      route(S.tab, true);
+    } catch (e) { toast('切换失败：' + e.message, true); }
+  }
+
   /* ---------------- 页面：设置 ---------------- */
   async function viewSettings() {
     const c = await api('/api/config');
@@ -1954,6 +1993,18 @@ const App = (() => {
         <input id="rail-${k}" type="number" step="0.1" value="${esc(r[k] ?? '')}"></label>`;
     const v = $('view');
     v.innerHTML = `
+      <div class="card" style="margin-bottom:14px"><h3>持有模式（决定单票最多能拿几天）</h3>
+        <div class="row">
+          ${(c.hold_modes || []).map(o => `
+            <button class="btn ${o.key === c.hold_mode ? 'primary' : ''}"
+                    onclick="App.setHoldMode('${o.key}')">${esc(o.label)} · ${o.max_hold_days} 天</button>`).join('')}
+          <span class="dim" style="font-size:12px">当前：${esc(c.hold_mode_label || '短线')}｜单票最多持有 ${c.hold_max_days || 3} 个交易日</span>
+        </div>
+        <div class="dim" style="margin-top:8px;font-size:12px">
+          切换即时生效（不用重启）。持有到期后由代码生成卖出计划单，AI 输出 HOLD 也会被覆盖：
+          短线 3 天（小资金快买快卖，默认）／中线 10 天／长线 20 天。
+        </div>
+      </div>
       <div class="grid g2">
         <div class="card"><h3>AI 大脑（OpenAI 兼容网关）</h3>
           <label class="f"><span>供应商</span>
@@ -2295,6 +2346,7 @@ const App = (() => {
 
   return {
     route, run, forceOpen, watchJob, closeJob, reset, saveConfig, saveSchedule, ping,
+    setHoldMode,
     showDecision, showPrompt, showReport, showJournal, showPb, showFailed,
     addWatch, saveWatch, openKline, selectJob, setKlinePeriod, setKlineDays,
     toggleAuto, refreshKline, drawChart, refreshDashboard, loadBackups, doBackup, doRestore,

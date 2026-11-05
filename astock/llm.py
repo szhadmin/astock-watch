@@ -135,7 +135,9 @@ class LLMClient:
         self.api_key = key
         self.timeout = float(cfg.get("timeout_sec", 180))
         self.temperature = float(cfg.get("temperature", 0.4))
-        self.max_tokens = int(cfg.get("max_tokens", 2000))
+        self.max_tokens = int(cfg.get("max_tokens", 8000))
+        # 输出额度上限（截断时自动升额的天花板）：默认取模型自身上限，不再人为压缩
+        self.ceiling = int(cfg.get("max_tokens_ceiling") or 393216)
         self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
         self.log_path = cfg.get("log_path")
         self.last_finish_reason = None
@@ -148,20 +150,27 @@ class LLMClient:
 
     # ------------------------------------------------------------------ #
     def chat(self, system, user, json_mode=True, temperature=None, max_tokens=None):
-        """返回 (text, usage)。空输出或截断时自动加倍 max_tokens 重试。"""
+        """返回 (text, usage)。空输出或截断时自动加倍 max_tokens 重试（最多两次、上限 32000）。
+
+        思考型模型会把额度烧在 reasoning 上，所以预算必须能往上走；
+        以前写死「budget < 8000 才重试、最多到 8000」，调大配置后反而不会重试了。
+        """
         budget = int(max_tokens or self.max_tokens)
         text, usage = self._call(system, user, json_mode, temperature, budget)
-        empty = not (text or "").strip()
-        if (self.last_truncated or empty) and budget < 8000:
-            bigger = min(budget * 2, 8000)
+        tries = 0
+        while tries < 2 and budget < self.ceiling and \
+                (self.last_truncated or not (text or "").strip()):
+            tries += 1
+            bigger = min(max(budget * 2, budget + 8000), self.ceiling)
             retry, usage2 = self._call(system, user, json_mode, temperature, bigger)
+            budget = bigger
             if retry and len(retry.strip()) > len((text or "").strip()):
-                return retry, usage2
+                text, usage = retry, usage2
         if not (text or "").strip():
             raise LLMError(
-                "模型只输出了思考内容、没有正文（finish_reason=%s，max_tokens=%d）。"
-                "思考型模型会消耗 completion_thinking_tokens：请把对应阶段的 max_tokens 调大"
-                "（建议 decide/review 4000~8000）。" % (self.last_finish_reason, budget))
+                "模型只输出了思考内容、没有正文（finish_reason=%s，max_tokens=%d，已自动升额重试 %d 次）。"
+                "思考型模型会消耗 completion_thinking_tokens：可以把该阶段的 max_tokens 再调大，"
+                "或换个不带思考的模型。" % (self.last_finish_reason, budget, tries))
         return text, usage
 
     def _call(self, system, user, json_mode, temperature, budget):

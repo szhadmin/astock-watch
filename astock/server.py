@@ -26,9 +26,9 @@ from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import (ai_agent, altdata, backup, discover, evolution, feed, holdings,
-               hypothesis, lab, mailer, market, memory, monitor, paper,
-               priors, regime, replay, report, rules, screener)
+from . import (ai_agent, altdata, backup, discover, evolution, feed, holdmode,
+               holdings, hypothesis, lab, mailer, market, memory, monitor,
+               paper, priors, regime, replay, report, rules, screener)
 from .ai_agent import AI_DIR, REPORT_DIR, STATE_PATH, WATCHLIST_PATH
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,7 +45,7 @@ DEFAULT_SCHEDULE = {"enabled": True, "decide_every_min": 30,
 ALLOWED_AI_KEYS = {"provider", "api_key", "model", "base_url", "temperature",
                    "max_tokens", "timeout_sec", "bars_in_prompt",
                    "max_tokens_pick", "max_tokens_decide", "max_tokens_review",
-                   "max_tokens_playbook"}
+                   "max_tokens_playbook", "max_tokens_ceiling", "hold_mode"}
 ALLOWED_RAIL_KEYS = set(ai_agent.RAILS_DEFAULT.keys())
 ALLOWED_EXEC_KEYS = set(ai_agent.DEFAULT_EXEC.keys())
 
@@ -59,11 +59,26 @@ def load_config():
 
 
 def save_config(cfg):
+    """保存 config.json。
+
+    容器里 config.json 常常是**文件级 bind mount**（`./config.json:/app/config.json`），
+    对这种目标做 os.replace() 会 EBUSY，所以失败时退回原地覆盖写。
+    """
     tmp = CONFIG_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
         f.write("\n")
-    os.replace(tmp, CONFIG_PATH)
+    try:
+        os.replace(tmp, CONFIG_PATH)
+    except OSError:
+        with open(tmp, encoding="utf-8") as f:
+            data = f.read()
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            f.write(data)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def broker():
@@ -289,6 +304,7 @@ def run_phase(params):
             mailer.send_digest(
                 "daily", journal=_latest_journal(),
                 plans=trader._load_plans(), advices=_holdings_advice(),
+                watch=trader._load_tomorrow_watch(),
                 account=trader._snapshot(), cfg=cfg,
                 attachments=[res.get("html"), res.get("md")],
                 extra_html=_real_stats_html(tr))
@@ -312,6 +328,7 @@ def run_phase(params):
                 pass
             mailer.send_digest(kind, journal=_latest_journal(),
                                plans=trader._load_plans(),
+                               watch=trader._load_tomorrow_watch(),
                                advices=_holdings_advice(),
                                account=trader._snapshot(), temp=temp, cfg=cfg)
         except Exception:
@@ -487,6 +504,22 @@ def _read_plans():
         return []
 
 
+def _read_tomorrow_watch():
+    """收盘后生成的「明日关注（待观察）」清单。"""
+    p = os.path.join(AI_DIR, "plans", "tomorrow_watch.json")
+    if not os.path.exists(p):
+        return {"for_date": "", "generated": "", "items": []}
+    try:
+        with open(p, encoding="utf-8-sig") as f:
+            d = json.load(f) or {}
+        if isinstance(d, list):                 # 兼容纯数组
+            d = {"for_date": "", "generated": "", "items": d}
+        d.setdefault("items", [])
+        return d
+    except Exception:
+        return {"for_date": "", "generated": "", "items": []}
+
+
 def _sma(values, n):
     out, s = [], 0.0
     for i, v in enumerate(values):
@@ -532,6 +565,11 @@ def api_overview(_q):
         "rails": {**ai_agent.RAILS_DEFAULT, **(ai.get("rails") or {})},
         "rails_desc": ai_agent.RiskRails(ai.get("rails"), b.state["capital"]).describe(),
         "plans": _read_plans(),
+        "watch_next": _read_tomorrow_watch(),
+        "hold_mode": holdmode.name(cfg),
+        "hold_mode_label": holdmode.label(cfg),
+        "hold_max_days": holdmode.max_hold_days(cfg),
+        "hold_modes": holdmode.options(),
         "usage": llm_usage_total(),
         "job": (rj[0]["id"] if rj else None),
         "running": [j["id"] for j in rj],
@@ -662,6 +700,10 @@ def api_config_get(_q):
             "rails": {**ai_agent.RAILS_DEFAULT, **(ai.get("rails") or {})},
             "execution": {**ai_agent.DEFAULT_EXEC, **(ai.get("execution") or {})},
             "schedule": {**DEFAULT_SCHEDULE, **(ai.get("schedule") or {})},
+            "hold_mode": holdmode.name(cfg),
+            "hold_mode_label": holdmode.label(cfg),
+            "hold_max_days": holdmode.max_hold_days(cfg),
+            "hold_modes": holdmode.options(),
             "account": cfg.get("account") or {}}
 
 
@@ -680,7 +722,7 @@ def api_config_set(body):
             ai[k] = float(v)
         elif k in ("max_tokens", "max_tokens_pick", "max_tokens_decide",
                    "max_tokens_review", "max_tokens_playbook",
-                   "timeout_sec", "bars_in_prompt"):
+                   "max_tokens_ceiling", "timeout_sec", "bars_in_prompt"):
             ai[k] = int(v)
         else:
             ai[k] = v
@@ -702,6 +744,29 @@ def api_config_set(body):
             changed.append("schedule." + k)
     save_config(cfg)
     return {"changed": changed, "config": api_config_get({})}
+
+
+def api_set_hold_mode(body):
+    """切换持有模式（短线/中线/长线）：即时生效，不用重启。
+
+    模式写在 data/ai/hold_mode.json（可写卷），config.json 只做兜底——
+    容器里 config.json 常是只读挂载，直接改它会失败。
+    """
+    m = str(body.get("mode") or "").strip().lower()
+    if m not in holdmode.PRESETS:
+        return None, "未知模式 %s（可选：%s）" % (m, "/".join(holdmode.PRESETS.keys()))
+    holdmode.set_mode(m)
+    try:                                   # 顺手同步 config.json（可写时才有意义）
+        cfg = load_config()
+        ai = cfg.setdefault("ai", {})
+        ai["hold_mode"] = m
+        ai["horizon_days"] = int(holdmode.PRESETS[m]["horizon_days"])
+        save_config(cfg)
+    except Exception:
+        pass
+    return {"mode": m, "label": holdmode.label(),
+            "max_hold_days": holdmode.max_hold_days(),
+            "options": holdmode.options()}
 
 
 def api_run(body):
@@ -1454,6 +1519,7 @@ POST_ROUTES = {
     "/api/mail": api_mail_save,
     "/api/mail/test": api_mail_test,
     "/api/restore": api_restore,
+    "/api/hold_mode": api_set_hold_mode,
 }
 
 

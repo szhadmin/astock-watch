@@ -18,9 +18,9 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, time as dtime, timedelta
 
-from . import (altdata, evolution, feed, holdings, hypothesis,
+from . import (altdata, evolution, feed, holdmode, holdings, hypothesis,
                indicators as ind, llm as llm_mod, mailer, market, memory,
                monitor, notify, paper, priors, rules as rules_mod,
                screener as scr, sizing)
@@ -395,6 +395,15 @@ class AITrader:
                  "成本": p["cost"], "浮动盈亏%": p["pnl_pct"],
                  "入场日": p.get("entry_date"), "我的止损": p.get("stop"),
                  "我的目标": p.get("target"), "当初理由": p.get("note") or ""}
+        held = holdmode.trading_days_held(p.get("entry_date"))
+        if held:
+            cap = holdmode.max_hold_days(self.ai_cfg)
+            brief["已持有交易日"] = held
+            brief["持有上限"] = "%d 个交易日（%s模式）" % (cap, holdmode.label(self.ai_cfg))
+            if held >= cap:
+                brief["⚠"] = "已超持有上限（%d 天 ≥ %d 天），代码会强制卖出" % (held, cap)
+            elif held >= cap - 1:
+                brief["⚠"] = "明天就满 %d 天，必须排卖出计划单" % cap
         if p.get("stop") and q.get("price") and q["price"] <= p["stop"]:
             brief["⚠"] = "现价已跌破我设定的止损"
         brief.update(self._bars_brief(p["code"]))
@@ -462,8 +471,8 @@ class AITrader:
                               "那是用户在网页上主动点的强制开仓，属于用户指令，"
                               "不得计入你自己的流程违规，也不要在教训里写成'情绪追涨'；"
                               "只记录客观结果与可复用条件。"),
-            "我的策略手册": memory.read_playbook()[:2500],
-            "近期日记": memory.recent_journal(3, 1200),
+            "我的策略手册": memory.read_playbook(),
+            "近期日记": memory.recent_journal(5, 8000),
             "当前持仓": [{"code": p["code"], "浮动盈亏%": p["pnl_pct"]} for p in snap["positions"]],
             "候选池(规则初筛后)": briefs,
             "要求": {
@@ -554,7 +563,7 @@ class AITrader:
             temp_info = market.market_temp()
             sector_rows = [{"板块": s["name"], "涨幅%": s["pct"],
                             "主力净流入万": round(s["main_in"] / 1e4, 0)}
-                           for s in market.sector_board(8)]
+                           for s in market.sector_board(20)]
             gate_info = market.gate(temp_info)
             if force_open:                       # 用户手动授权：解除闸门冻结
                 gate_info = dict(gate_info or {})
@@ -569,7 +578,7 @@ class AITrader:
             print(color("  （大盘温度获取失败：%s，按常规风控）" % exc, "grey"))
         # 持仓与观察池的所属板块（只用前几只，控制 token）
         try:
-            for item in (positions[:3] + watch[:3]):
+            for item in (positions + watch):
                 secs = market.stock_sectors(item.get("code") or "")
                 if secs:
                     item["所属板块"] = "%s(%+.2f%%) / %s(%+.2f%%)" % (
@@ -582,7 +591,7 @@ class AITrader:
         try:
             use_alt = bool((self.ai_cfg or {}).get("use_altdata", True))
             token = (self.ai_cfg or {}).get("tushare_token", "")
-            for item in (positions[:3] + watch[:3]):
+            for item in (positions + watch):
                 if not use_alt:
                     break
                 c = item.get("code")
@@ -643,6 +652,25 @@ class AITrader:
             print(color("  （连续加权计算失败：%s）" % exc, "yellow"))
         day["sizing"] = sizing_map
         day["force_plan"] = bool(force_plan)      # 收盘后复盘用：只出次日计划单，不成交
+        # 今日计划单的「执行情况」：收盘后的计划阶段先把旧单归档清空，
+        # 让本轮生成的就是唯一的「明日计划单」——否则前端/邮件会一直显示昨天的残留单。
+        pending_before = self._load_plans()
+        if force_plan:
+            pending_before = self._reset_plans("pre-plan")
+        # 明日开盘会先执行这些确定性卖单（时间止损）：腾出的现金和风险额度
+        # 明天是可以用来买的，所以买入额度必须按「卖出后」的预计账户来算，
+        # 否则满仓状态下永远判「无新仓额度」，卖完的钱就干躺着。
+        time_stops = []
+        if force_plan:
+            try:
+                time_stops = self._time_stop_actions(snap, force_plan=True)
+            except Exception as exc:                   # noqa: BLE001
+                print(color("  （时间止损预演失败：%s）" % exc, "grey"))
+        projected = self._project_after_sells(snap, time_stops) if time_stops else None
+        proj_summary, proj_snap = projected if projected else (None, None)
+        # 计划单是明天开盘执行的：风控要按「卖单先成交」之后的账户校验，
+        # 否则今天的满仓状态会把明天本可以做的买入全拒掉。
+        day["projected_snap"] = proj_snap
         payload = {
             "task": "decide",
             "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -652,8 +680,10 @@ class AITrader:
                     "累计收益%": snap["total_return_pct"],
                     "今日已交易笔数": day["trades"], "今日浮亏%": day["loss_pct"],
                     "今日是否触发亏损熔断": day["loss_limit_hit"]},
+            "明日开盘后预计账户(卖单先成交，买入额度按这个算)": proj_summary or
+                "本次没有到期卖单，买入额度按上面「账户」的实际数字算",
             "硬性风控(不可违反)": self.rails.describe(),
-            "我的策略手册": memory.read_playbook()[:2500],
+            "我的策略手册": memory.read_playbook(),
             "我的生效规则(经统计验证，权重最高)": _active_rules(),
             "候选规则(样本不足，仅供参考、不许当依据)": _pending_rule_count(),
             "大盘温度": temp_info,
@@ -670,10 +700,16 @@ class AITrader:
                 "你的活": "在「观察池/持仓」里会看到每只票的 评分、评分变化、建议单股上限%，"
                           "按这个尺度决定买多少，而不是只决定买不买",
             },
-            "持有期指引(回放证据)": {
-                "结论": "扣费扣beta后的平均超额：5日+0.30%、10日+0.92%、20日+2.34%",
-                "要求": "默认目标持有 %d~20 个交易日；不要为了 1~2 个点的波动反复进出"
-                        % int((self.ai_cfg or {}).get("horizon_days") or 10),
+            "持有期指引(用户模式，硬约束)": {
+                "模式": "%s｜单票最多持有 %d 个交易日"
+                        % (holdmode.label(self.ai_cfg), holdmode.max_hold_days(self.ai_cfg)),
+                "铁律": "持有到期由代码强制卖出，你输出 HOLD 也会被覆盖；"
+                        "买入那一刻就要把「第几天退出」算清楚，"
+                        "不许把短线拖成中线（这是用户明确要求，优先级高于任何回放证据）",
+                "回放证据(只作参考，不得用来违抗模式)":
+                    "扣费扣beta后的平均超额：5日+0.30%、10日+0.92%、20日+2.34%"
+                    "——长持有期统计上更好，但用户当前要的是短线滚动，按模式执行",
+                "止盈参考": holdmode.preset(self.ai_cfg)["target_hint"],
             },
             "我的持仓(真实账户，AI 不能下单，只给建议)": my_holds,
             "额外要求": ("若「我的持仓(真实账户)」非空，必须在 JSON 里额外输出 "
@@ -682,7 +718,7 @@ class AITrader:
                      '"触发位":"如跌破2.53清仓/站上2.74加仓","理由":"一句话具体理由"}。'
                      "建议要务实可执行、必须有触发价，不许说\"视情况而定\"。"
                      "这些是对真人账户的建议，不是模拟盘下单，不要和 actions 混在一起。"),
-            "待执行计划单(昨日收盘时定下，今日开盘按规则执行)": self._load_plans(),
+            "今日计划单执行回顾(开盘已执行/已过期归档，仅供复盘，不是明日指令)": pending_before,
             "关于「计划单为空」": ("计划单为空只代表昨天没有触发信号，"
                              "绝不等于今天禁止开仓。只要有候选池/观察池里符合手册的标的，"
                              "就应当正常给出 BUY 并落为计划单。"
@@ -690,6 +726,7 @@ class AITrader:
                              "『不开仓→计划单空→更不开仓』的死循环，属于系统性错失。"),
             "开仓节奏(代码统计)": _idle_state(),
             "参与度设定(用户偏好，必须遵守)": _participation_brief(self.cfg),
+            "持有模式(用户偏好，代码会强制)": holdmode.brief(self.ai_cfg),
             "持仓": positions,
             "观察池": watch,
             "要求": {
@@ -702,11 +739,21 @@ class AITrader:
                                  "stop": "买入必填止损价",
                                  "target": "目标价（可选）",
                                  "reason": "为什么（≤60字，说明依据的K线/指标/资金）"}],
+                    "明日关注": [{"code": "6位代码",
+                               "name": "名称",
+                               "关注理由": "≤40字，为什么明天值得盯（板块/K线/资金）",
+                               "触发条件": "明天盘中看到就能执行的买点或条件，"
+                                           "如『站上12.80且量比>1.5』『回踩11.50不破』",
+                               "优先级": "高|中|低"}],
                     "journal": "我今天的判断与心态（≤200字）"},
                 "原则": ["没有明确止损位的开仓一律不要给",
                        "优先处理持仓（止损/止盈），再考虑新开仓",
                        "不确定就 HOLD，空仓也是决策",
-                       "禁止编造未在数据中出现的代码或价格"],
+                       "禁止编造未在数据中出现的代码或价格",
+                       "「明日关注」最多 5 只，只能从观察池/持仓里选；"
+                       "即使今天不买，也要把明天最看好的几只写清楚——这是给用户看的明日清单",
+                       "卖出就是为了换仓：若「明日开盘后预计账户」显示有可用现金与仓位空间，"
+                       "就必须在这些额度内给出买入计划，把钱放着不动等于白卖"],
             },
         }
         if force_open:
@@ -723,13 +770,19 @@ class AITrader:
                 pass
         user = json.dumps(payload, ensure_ascii=False)
         self._log_prompt("decide", user)
-        text, usage = self.llm.chat(SYSTEM_STRATEGIST, user,
-                                    max_tokens=self._budget("max_tokens_decide", 2000))
+        try:
+            text, usage = self.llm.chat(SYSTEM_STRATEGIST, user,
+                                        max_tokens=self._budget("max_tokens_decide", 2000))
+        except Exception as exc:                       # noqa: BLE001
+            print(color("  ✘ 模型调用失败：%s" % str(exc)[:160], "yellow"))
+            self._salvage_time_stops(time_stops, snap, watch, day)
+            raise
         data = llm_mod.extract_json(text) or {}
         self._log_output("decide", text, usage)
         if not data:
             self._capture_failure("decide", text, user)
             print(color("  AI 输出无法解析为 JSON，本次不交易（原文已存 data/ai/failed/）", "yellow"))
+            self._salvage_time_stops(time_stops, snap, watch, day)
             memory.append_journal("【操盘】模型输出解析失败，未交易。", phase="操盘")
             return None
 
@@ -773,12 +826,45 @@ class AITrader:
         except Exception as exc:
             print(color("  （持仓建议保存失败：%s）" % exc, "yellow"))
         acts = data.get("actions") or []
+        # ① 时间止损（代码强制）：持有到期/超期的持仓必须卖出，模型说 HOLD 也不算
+        try:
+            forced = time_stops or self._time_stop_actions(snap, force_plan=bool(force_plan))
+            have_sell = {str(x.get("code") or "") for x in acts
+                         if (x.get("action") or "").upper() in ("SELL", "REDUCE")}
+            forced = [a for a in forced if a["code"] not in have_sell]
+            if forced:
+                acts = forced + acts
+                data["actions"] = acts
+                print(color("  ⏰ 时间止损（%s模式最多 %d 个交易日）：%s 到期 → 强制卖出"
+                            % (holdmode.label(self.ai_cfg),
+                               holdmode.max_hold_days(self.ai_cfg),
+                               "、".join("%s %d股（已持有%d日）"
+                                        % (a["code"], a["shares"], a["held"])
+                                        for a in forced)), "yellow"))
+        except Exception as exc:                       # noqa: BLE001
+            print(color("  （时间止损判定失败：%s）" % exc, "grey"))
+        # ② 明日关注清单（用户就想知道「明天哪些票看好」）
+        if force_plan:
+            try:
+                items = data.get("明日关注") or []
+                if not items:
+                    items = self._fallback_watch_items(watch, 3)
+                    if items:
+                        print(color("  ⓘ 模型没给「明日关注」，用观察池评分最高的 %d 只兜底"
+                                    % len(items), "yellow"))
+                self._save_tomorrow_watch(items, self._plan_for_date(True))
+            except Exception as exc:                   # noqa: BLE001
+                print(color("  （明日关注保存失败：%s）" % exc, "grey"))
         try:
             _ai = (self.cfg.get("ai") or {}) if isinstance(self.cfg, dict) else {}
             need = int(_ai.get("plan_target_count") or 3)
             have = [x for x in acts if (x.get("action") or "").upper() == "BUY"]
             if len(have) < need:
-                extra = self._trial_candidates(watch, day, snap, need=need - len(have))
+                # 额度按「卖完之后」的账户算：卖出的钱明天是可以再买的
+                extra = self._trial_candidates(
+                    watch, day, proj_snap or snap, need=need - len(have),
+                    exclude={str(x.get("code") or "") for x in have}
+                    | {a["code"] for a in time_stops})
                 if extra:
                     acts.extend(extra)
                     data["actions"] = acts
@@ -788,7 +874,36 @@ class AITrader:
                                 "yellow"))
         except Exception as exc:                       # noqa: BLE001
             print(color("  （试错仓判定失败：%s）" % exc, "grey"))
+        # ③ 明日总交易笔数是硬上限（卖单也算）：计划里多出来的买单明天一定会被拒，
+        #    不如现在就砍掉，免得邮件里出现执行不了的计划。
+        if force_plan:
+            try:
+                cap_trades = int(float((self.rails.cfg or {}).get("max_trades_per_day") or 4))
+                n_sell = sum(1 for a in acts
+                             if (a.get("action") or "").upper() in ("SELL", "REDUCE"))
+                room = max(0, cap_trades - n_sell)
+                kept, dropped = 0, 0
+                trimmed = []
+                for a in acts:
+                    if (a.get("action") or "").upper() == "BUY":
+                        if kept >= room:
+                            dropped += 1
+                            continue
+                        kept += 1
+                    trimmed.append(a)
+                if dropped:
+                    acts = trimmed
+                    data["actions"] = acts
+                    print(color("  ⓘ 明日最多 %d 笔（卖单已占 %d 笔）→ 砍掉 %d 条执行不了的买入计划"
+                                % (cap_trades, n_sell, dropped), "yellow"))
+            except Exception as exc:                   # noqa: BLE001
+                print(color("  （交易笔数裁剪失败：%s）" % exc, "grey"))
         results = self._execute(acts, snap, watch, day)
+        if force_plan:                       # 计划单写完后按每日笔数上限做最终裁剪
+            try:
+                self._trim_plans_to_trade_cap(self._plan_for_date(True))
+            except Exception as exc:                   # noqa: BLE001
+                print(color("  （计划单笔数裁剪失败：%s）" % exc, "grey"))
         memory.append_journal(
             "【操盘】%s\n%s\n执行：%s" % (view, data.get("journal", ""),
                                     "\n".join(results) if results else "无操作"),
@@ -802,13 +917,15 @@ class AITrader:
                                   extra={"index": self._index_close()})
         return data
 
-    def _trial_candidates(self, watch, day, snap=None, need=3):
+    def _trial_candidates(self, watch, day, snap=None, need=3, exclude=None):
         """均衡/积极档强制参与：挑出 need 只满足硬条件的试错仓。
 
         准入（代码判定）：评分 ≥ trial_min_score、评分变化 ≥ trial_min_score_chg、
         板块不弱势、止损距离 ≤8%、单笔风险 ≤ 均分后的剩余预算、现金买得起一手。
         风险预算按「本次还需几只」均分，保证 3 只都能落地而不互相挤占。
+        exclude：AI 已经给出 BUY 的代码，避免同一只票重复下两张计划单。
         """
+        exclude = exclude or set()
         ai = (self.cfg.get("ai") or {}) if isinstance(self.cfg, dict) else {}
         level = str(ai.get("participation") or "balanced").lower()
         if level == "conservative":
@@ -836,6 +953,8 @@ class AITrader:
             sc = it.get("评分")
             chg = it.get("评分变化")
             if not code or not px:
+                continue
+            if str(code) in exclude:          # AI 已经买过这只，不再重复补计划
                 continue
             if it.get("⚠板块"):
                 continue
@@ -892,6 +1011,10 @@ class AITrader:
         session_open = monitor.in_session(include_auction=False)
         deferred = bool(day.get("force_plan")) or \
             (not session_open and exec_cfg.get("defer_outside_session", True))
+        # 计划单在「执行日开盘」成交，而那一天开盘会先卖掉到期的仓位：
+        #   · 买单 → 用预计（卖出后）快照校验，否则今天的满仓会把明天本可以做的买入全拒掉；
+        #   · 卖单 → 仍用实时快照校验（预计快照里这些票已经算卖掉了）。
+        proj_snap = day.get("projected_snap") if deferred else None
         for a in actions:
             code = str(a.get("code") or "")
             act = (a.get("action") or "").upper()
@@ -931,8 +1054,9 @@ class AITrader:
             gate_cap = (gate_info or {}).get("max_position_pct")
             size_cap = (day.get("sizing") or {}).get(code)
             caps = [x for x in (gate_cap, size_cap) if x]
+            check_snap = proj_snap if (act == "BUY" and proj_snap) else snap
             ok, why, shares = self.rails.check(
-                a, snap, q, day, cap_override=(min(caps) if caps else None),
+                a, check_snap, q, day, cap_override=(min(caps) if caps else None),
                 force_open=bool(day.get("force_open")))
             name = q.get("name") or ""
             if not ok:
@@ -949,12 +1073,14 @@ class AITrader:
                 print(color("  · " + msg, "grey"))
                 results.append(msg)
                 continue
-            # 非交易时段：不下单，转为「次日计划单」（避免用收盘价事后成交）
+            # 非交易时段：不下单，转为计划单（避免用收盘价事后成交）
             if deferred:
+                for_date = self._plan_for_date(bool(day.get("force_plan")))
                 self._add_plan(code, name, act, shares, q.get("price"),
-                               a.get("stop"), a.get("target"), reason)
-                msg = ("计划 %s %s %d 股（信号价 %.3f）→ 已存入次日计划单，"
-                       "开盘按规则执行" % (code, act, shares, q.get("price") or 0))
+                               a.get("stop"), a.get("target"), reason,
+                               for_date=for_date)
+                msg = ("计划 %s %s %d 股（信号价 %.3f）→ 已存入计划单，执行日 %s 开盘按规则执行"
+                       % (code, act, shares, q.get("price") or 0, for_date))
                 print(color("  ⏳ " + msg, "yellow"))
                 results.append(msg)
                 continue
@@ -1011,18 +1137,283 @@ class AITrader:
                     pass
         return results
 
-    # ---------------- 次日计划单 ----------------
+    # ---------------- 计划单（含执行日归属） ----------------
     def _plans_path(self):
         os.makedirs(PLANS_DIR, exist_ok=True)
         return os.path.join(PLANS_DIR, "pending_plans.json")
 
+    def _next_trading_date(self, base=None):
+        """下一个交易日（跳过周末）。"""
+        d = (base or datetime.now()).date() + timedelta(days=1)
+        for _ in range(14):
+            if monitor.is_trading_day(datetime.combine(d, dtime(9, 30))):
+                break
+            d += timedelta(days=1)
+        return d.strftime("%Y-%m-%d")
+
+    def _plan_for_date(self, force_plan=False):
+        """计划单的「执行日」。
+
+        · 盘前（09:30 之前）决策 → 当天开盘执行（否则会拖到明天重复下单）；
+        · 收盘后计划阶段（force_plan）→ 下一个交易日；
+        · 其余非交易时段 → 下一个交易日。
+        """
+        now = datetime.now()
+        if not force_plan and monitor.is_trading_day(now) and now.time() < dtime(9, 30):
+            return now.strftime("%Y-%m-%d")
+        return self._next_trading_date(now)
+
+    def _plan_exec_date(self, pl):
+        """计划单的执行日；兼容没有 for_date 的历史数据（退回 signal_date）。"""
+        return str((pl or {}).get("for_date") or (pl or {}).get("signal_date") or "")
+
+    # ---------------- 时间止损（持有模式强制） ----------------
+    def _project_after_sells(self, snap, sells):
+        """把已排定的卖单先结算一遍，得到「明天开盘卖出之后」的账户。
+
+        用途：收盘后的计划阶段按这个账户算买入额度。否则仓位 79% 的时候
+        永远判「无新仓额度」，卖出腾出来的现金就只能干躺着（等于白卖）。
+        返回 (给提示词看的摘要, 供额度计算用的预计快照)。
+        """
+        positions = []
+        for p in (snap or {}).get("positions") or []:
+            positions.append(dict(p))
+        by_code = {p["code"]: p for p in positions}
+        cash = float((snap or {}).get("cash") or 0)
+        freed, sold = 0.0, []
+        for a in sells or []:
+            p = by_code.get(a.get("code"))
+            if not p:
+                continue
+            shares = min(int(a.get("shares") or 0), int(p.get("shares") or 0))
+            px = float(p.get("price") or a.get("limit_price") or 0)
+            if shares <= 0 or px <= 0:
+                continue
+            proceeds = shares * px * 0.999        # 粗略扣掉卖出费用
+            cash += proceeds
+            freed += proceeds
+            p["shares"] = int(p["shares"]) - shares
+            p["market_value"] = round(px * p["shares"], 2)
+            if p["shares"] <= 0:
+                by_code.pop(p["code"], None)
+            sold.append("%s %d股≈%.0f元" % (p.get("name") or a.get("code"), shares, proceeds))
+        rest = list(by_code.values())
+        mv = sum(float(p.get("price") or 0) * int(p.get("shares") or 0) for p in rest)
+        risk = sum(max(0.0, float(p.get("price") or 0) - float(p.get("stop") or 0))
+                   * int(p.get("shares") or 0) for p in rest)
+        equity = cash + mv
+        cap = float((self.rails.cfg or {}).get("max_total_position_pct") or 80.0)
+        risk_cap_pct = float((self.rails.cfg or {}).get("max_total_risk_pct") or 3.0)
+        risk_room = max(0.0, equity * risk_cap_pct / 100 - risk)
+        summary = {
+            "动作": "开盘先卖出：" + "、".join(sold) if sold else "无",
+            "预计现金": round(cash, 2),
+            "预计可用买入金额(按总仓上限 %.0f%% 算)" % cap: round(
+                max(0.0, equity * cap / 100 - mv), 2),
+            "预计持仓市值": round(mv, 2),
+            "预计总权益": round(equity, 2),
+            "预计仓位%": round(mv / equity * 100, 2) if equity else 0.0,
+            "预计组合风险额": round(risk, 2),
+            "预计组合风险%": round(risk / equity * 100, 2) if equity else 0.0,
+            "预计还可增加的风险额(硬上限 %.1f%%)" % risk_cap_pct: round(risk_room, 2),
+            "明日剩余可交易笔数(卖单已占 %d 笔)" % len(sold): int(
+                max(0, float((self.rails.cfg or {}).get("max_trades_per_day") or 4)
+                    - len(sold))),
+            "说明": "卖出的钱明天是可以再买的：买入计划按这里的可用金额与组合风险额度来定。"
+                    "若你手册里的自设目标比硬上限更严，先用硬上限判断「到底有没有空间」，"
+                    "有空间就在空间内按手册谨慎取小；只有确实没有空间才允许零买入。",
+        }
+        proj_snap = {"cash": round(cash, 2), "market_value": round(mv, 2),
+                     "equity": round(equity, 2), "positions": rest,
+                     "total_return_pct": self.broker.state.get("capital") and
+                     round((equity / float(self.broker.state["capital"]) - 1) * 100, 2)}
+        return summary, proj_snap
+
+    def _time_stop_actions(self, snap, force_plan=False):
+        """把「持有到期」的持仓变成强制卖出动作。
+
+        盘中（force_plan=False）：持有已达上限 N 天 → 立刻卖；
+        收盘计划阶段（force_plan=True）：持有已达 N-1 天 → 排明日开盘卖出的计划单，
+        这样正好在第 N 个交易日了结，不会把短线拖成中线。
+        """
+        cap = holdmode.max_hold_days(self.ai_cfg)
+        need = max(1, cap - 1) if force_plan else cap
+        out = []
+        for p in (snap or {}).get("positions") or []:
+            code = str(p.get("code") or "")
+            held = holdmode.trading_days_held(p.get("entry_date"))
+            if not code or not held or held < need:
+                continue
+            shares = int(p.get("available") or 0)
+            if shares <= 0:                     # T+1 不可卖，明天再说
+                continue
+            out.append({"code": code, "name": p.get("name") or "",
+                        "action": "SELL", "shares": shares,
+                        "limit_price": p.get("price"), "stop": None, "target": None,
+                        "held": held,
+                        "reason": "时间止损：%s模式最多持有 %d 个交易日，已持有 %d 日"
+                                  % (holdmode.label(self.ai_cfg), cap, held)})
+        return out
+
+    # ---------------- 明日关注（待观察清单） ----------------
+    def _watch_next_path(self):
+        os.makedirs(PLANS_DIR, exist_ok=True)
+        return os.path.join(PLANS_DIR, "tomorrow_watch.json")
+
+    def _fallback_watch_items(self, watch, n=3):
+        """AI 没给「明日关注」时，用观察池评分最高的几只兜底。
+
+        用户要的是「明天哪些票看好」，这个清单不该因为模型这次话少就空着。
+        """
+        cands = []
+        for it in watch or []:
+            code = str(it.get("code") or "")
+            if not code or it.get("⚠板块"):
+                continue
+            sc = it.get("评分")
+            cands.append((float(sc) if sc is not None else -1.0, code, it))
+        cands.sort(key=lambda x: -x[0])
+        out = []
+        for sc, code, it in cands:
+            hi = it.get("近20日高点")
+            out.append({"code": code,
+                        "name": it.get("name") or "",
+                        "关注理由": "代码兜底（模型未给清单）：评分 %s、变化 %s、%s"
+                                    % (it.get("评分"), it.get("评分变化"),
+                                       it.get("所属板块") or "板块未取到"),
+                        "触发条件": ("放量站上前高 %.2f" % hi) if hi
+                                    else "回踩不破 5 日线再介入",
+                        "优先级": "高" if not out else "中"})
+            if len(out) >= n:
+                break
+        return out
+
+    def _save_tomorrow_watch(self, items, for_date):
+        clean = []
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            code = str(it.get("code") or "").strip()
+            if not code:
+                continue
+            clean.append({"code": code,
+                          "name": it.get("name") or "",
+                          "reason": str(it.get("关注理由") or it.get("reason") or "")[:200],
+                          "trigger": str(it.get("触发条件") or it.get("trigger") or "")[:200],
+                          "priority": str(it.get("优先级") or it.get("priority") or "中")})
+            if len(clean) >= 5:
+                break
+        data = {"for_date": for_date,
+                "generated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "mode": holdmode.name(self.ai_cfg),
+                "items": clean}
+        with open(self._watch_next_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        print(color("  👀 明日关注清单已保存 %d 只（执行日 %s）" % (len(clean), for_date), "grey"))
+        return data
+
+    def _load_tomorrow_watch(self):
+        p = self._watch_next_path()
+        if not os.path.exists(p):
+            return {"for_date": "", "items": []}
+        try:
+            with open(p, encoding="utf-8-sig") as f:
+                return json.load(f) or {"for_date": "", "items": []}
+        except Exception:
+            return {"for_date": "", "items": []}
+
+    def _archive_plans(self, plans, tag="archive"):
+        if not plans:
+            return None
+        d = os.path.join(PLANS_DIR, "history")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "%s_%s.json"
+                            % (datetime.now().strftime("%Y%m%d_%H%M%S"), tag))
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(plans, f, ensure_ascii=False, indent=1)
+            return path
+        except Exception as exc:                       # noqa: BLE001
+            print(color("  （计划单归档失败：%s）" % exc, "yellow"))
+            return None
+
+    def _reset_plans(self, tag="reset"):
+        """归档并清掉「已过期」的旧计划单（收盘后的计划阶段用）。
+
+        过期 = 执行日 ≤ 今天：要么今天开盘已经执行过，要么已被取消，留着只会让
+        「明日计划单」继续显示昨天的内容。执行日在未来的计划单保留不动。
+        清空后本轮生成什么就是什么；一条都没有＝明日不开新仓（这本身就是决策）。
+        返回被清掉的旧单，供提示词里的「今日计划单回顾」使用。
+        """
+        old = self._load_plans()
+        today = datetime.now().strftime("%Y-%m-%d")
+        keep = [p for p in old if self._plan_exec_date(p) > today]
+        drop = [p for p in old if self._plan_exec_date(p) <= today]
+        if not drop:
+            if keep:
+                print(color("  ⓘ 保留 %d 条未到期计划单（执行日在未来）" % len(keep), "grey"))
+            return []
+        path = self._archive_plans(drop, tag)
+        self._save_plans(keep)
+        self._dedup_plans()
+        print(color("  ⓘ 旧计划单 %d 条已归档并清空%s%s"
+                    % (len(drop),
+                       "（%s）" % os.path.basename(path) if path else "",
+                       "，保留 %d 条未到期" % len(keep) if keep else ""), "grey"))
+        return drop
+
+    def _salvage_time_stops(self, sells, snap, watch, day):
+        """模型失败时的兜底：到期卖出的纪律不能因为模型挂了就不执行。"""
+        if not sells:
+            return []
+        print(color("  ⏰ 模型本轮失败，但时间止损照常执行：%s"
+                    % "、".join("%s %d股" % (a["code"], a["shares"]) for a in sells), "yellow"))
+        try:
+            res = self._execute(sells, snap, watch, day)
+            if day.get("force_plan"):
+                try:
+                    self._trim_plans_to_trade_cap(self._plan_for_date(True))
+                except Exception:                      # noqa: BLE001
+                    pass
+            return res
+        except Exception as exc:                       # noqa: BLE001
+            print(color("  （时间止损兜底执行失败：%s）" % exc, "yellow"))
+            return []
+
+    def _trim_plans_to_trade_cap(self, for_date):
+        """同一执行日的计划单不能超过「每日最大交易笔数」（卖单也占名额）。
+
+        收盘计划阶段结束前对**最终文件**做一次裁剪——因为上一轮的未到期计划单
+        会被保留下来，只按本轮新增去裁剪会漏算。
+        """
+        cap = int(float((self.rails.cfg or {}).get("max_trades_per_day") or 4))
+        plans = self._load_plans()
+        same = [p for p in plans if self._plan_exec_date(p) == for_date]
+        if len(same) <= cap:
+            return plans
+        sells = [p for p in same if (p.get("action") or "").upper() != "BUY"]
+        buys = [p for p in same if (p.get("action") or "").upper() == "BUY"]
+        room = max(0, cap - len(sells))
+        keep = sells + buys[:room]
+        dropped = buys[room:]
+        other = [p for p in plans if self._plan_exec_date(p) != for_date]
+        self._archive_plans(dropped, "trade-cap-trim")
+        self._save_plans(other + keep)
+        if dropped:
+            print(color("  ⓘ %s 计划共 %d 条超每日 %d 笔上限 → 砍掉买入 %s（明天执行不了，"
+                        "不写进计划单）" % (for_date, len(same), cap,
+                                           "、".join(p.get("code") or "?" for p in dropped)),
+                        "yellow"))
+        return other + keep
+
     def _dedup_plans(self):
-        """同一代码+同一方向+同一信号日，只保留最早的一条（防重复下单）。"""
+        """同一代码+同一方向+同一执行日，只保留最早的一条（防重复下单）。"""
         plans = self._load_plans()
         seen = {}
         out = []
         for pl in plans:
-            key = (pl.get("code"), (pl.get("action") or "").upper(), pl.get("signal_date"))
+            key = (pl.get("code"), (pl.get("action") or "").upper(),
+                   self._plan_exec_date(pl))
             if key in seen:
                 continue
             seen[key] = True
@@ -1046,18 +1437,27 @@ class AITrader:
         with open(self._plans_path(), "w", encoding="utf-8") as f:
             json.dump(plans, f, ensure_ascii=False, indent=1)
 
-    def _add_plan(self, code, name, action, shares, signal_price, stop, target, reason):
+    def _add_plan(self, code, name, action, shares, signal_price, stop, target, reason,
+                  for_date=None):
         plans = self._load_plans()
-        plans.append({"signal_date": datetime.now().strftime("%Y-%m-%d"),
+        plans.append({"for_date": for_date or self._plan_for_date(),
+                      "signal_date": datetime.now().strftime("%Y-%m-%d"),
                       "signal_time": datetime.now().strftime("%H:%M:%S"),
                       "code": code, "name": name, "action": action, "shares": shares,
                       "signal_price": signal_price, "stop": stop, "target": target,
                       "reason": reason})
         self._save_plans(plans)
+        self._dedup_plans()
 
     def phase_execute_plans(self, verbose=True):
-        """开盘后执行上一交易日遗留的计划单（含隔夜跳空取消规则）。"""
-        plans = self._load_plans()
+        """开盘后执行到期计划单（含隔夜跳空取消规则）。
+
+        执行日 for_date ≤ 今天 的计划单才会被执行：收盘后生成的明日计划单
+        到了那个交易日才成交；未到期的留给后面。
+        """
+        plans = self._dedup_plans()      # 同一代码/方向/执行日只执行一条
+        # 先卖后买：卖单先成交，腾出的现金/仓位才能支持后面的买单（同一份资金不重复算）
+        plans.sort(key=lambda p: 1 if (p.get("action") or "").upper() == "BUY" else 0)
         if not plans:
             if verbose:
                 print(color("\n【执行计划】无待执行计划单。", "grey"))
@@ -1066,13 +1466,13 @@ class AITrader:
         cancel_pct = float(exec_cfg.get("cancel_if_gap_pct", 1.5))
         today = datetime.now().strftime("%Y-%m-%d")
         if verbose:
-            print(color("\n【执行计划】待执行 %d 条（开盘价偏离 >%.1f%% 或跳空跌破止损则取消）"
-                        % (len(plans), cancel_pct), "bold"))
+            print(color("\n【执行计划】待执行 %d 条（执行日≤%s；开盘价偏离 >%.1f%% 或跳空跌破止损则取消）"
+                        % (len(plans), today, cancel_pct), "bold"))
         snap = self._snapshot()
         day = {"trades": 0, "loss_pct": 0.0, "loss_limit_hit": False}
         remaining, results = [], []
         for pl in plans:
-            if pl["signal_date"] >= today:           # 当天的计划等次日
+            if self._plan_exec_date(pl) > today:     # 还没到执行日（明日计划单）
                 remaining.append(pl)
                 continue
             code = pl["code"]
@@ -1164,6 +1564,7 @@ class AITrader:
                         "不得计入你的流程违规，也不得写成'情绪追涨'；"
                         "只记录客观结果与可复用条件。"),
             "date": today,
+            "用户持有模式(不可协商，手册必须服从)": holdmode.brief(self.ai_cfg),
             "账户与绩效": {"总权益": snap["equity"], "累计收益%": snap["total_return_pct"],
                        "同期指数%": stats.get("index_return_pct"),
                        "相对指数超额%": stats.get("excess_pct"),
@@ -1177,13 +1578,13 @@ class AITrader:
                          "actions": [{k: a.get(k) for k in ("code", "action", "shares", "reason")}
                                      for a in (d.get("actions") or [])]}
                         for d in memory.decision_history(2)][-6:],
-            "今日日记": memory.recent_journal(1, 1200),
+            "今日日记": memory.recent_journal(2, 8000),
             "我过去的判断与真实结果(务必据此改规则，别凭印象)": judgment_rows,
             "我的判断记分卡": card,
-            "系统已验证先验(勿改写)": priors.text(900),
+            "系统已验证先验(勿改写)": priors.text(),
             "我的错题本(最近判断失误，必须逐条归因)": mistakes,
             "策略手册版本A/B(不同版本生效期间的表现)": ab,
-            "我的现用手册": memory.read_playbook()[:2500],
+            "我的现用手册": memory.read_playbook(),
             "要求": {
                 "输出JSON": {
                     "critique": "对今天操作的严厉评价（哪些是纪律，哪些是情绪/运气），150字内",
@@ -1198,6 +1599,8 @@ class AITrader:
                        "例：当大盘温度<30 时不追高开>2% 的票；写不出阈值的会被系统丢弃",
                        "若「我过去的判断与真实结果」里出现未命中的判断，教训必须点名"
                        "是哪一条、错在哪个前提（方向错/时机错/失效条件设错）",
+                       "手册里凡是写「持有 10~20 日」这类与「用户持有模式」冲突的表述，"
+                       "必须改写成服从模式上限的说法（短线上限 3 个交易日由代码强制执行）",
                        "样本不足 5 条的分组不许当规律用，只能标记为『观察中』"],
             },
         }
@@ -1257,7 +1660,7 @@ class AITrader:
                 "当前持仓": [{k: p[k] for k in ("code", "name", "shares", "cost",
                                               "price", "pnl_pct", "stop")}
                            for p in snap["positions"]],
-                "上一版手册": memory.read_playbook()[:2500],
+                "上一版手册": memory.read_playbook(),
             }, ensure_ascii=False)
             self._log_prompt("playbook", pb_prompt)
             pb_text, pb_usage = self.llm.chat(

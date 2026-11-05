@@ -227,8 +227,11 @@ def send_trade(side, code, name, shares, price, amount, reason, account=None, cf
 
 
 def send_digest(kind, journal="", plans=None, advices=None, account=None, temp=None,
-                cfg=None, attachments=None, extra_html=""):
-    """每日复盘 / 次日计划 / 持仓建议 汇总邮件。"""
+                cfg=None, attachments=None, extra_html="", watch=None):
+    """每日复盘 / 次日计划 / 持仓建议 汇总邮件。
+
+    plans：待执行计划单（买入/卖出）；watch：「明日关注/待观察」清单。
+    """
     ev = conf(cfg)["events"]
     key = "plan" if kind in ("plan", "daily") else "review"
     if not ev.get(key, True):
@@ -240,19 +243,57 @@ def send_digest(kind, journal="", plans=None, advices=None, account=None, temp=N
         parts.append("<div><span class='badge'>大盘温度 %s（%s）</span>"
                      "<span class='badge warn'>%s</span></div>"
                      % (temp.get("temp"), temp.get("level"), (temp.get("note") or "")[:60]))
-    if plans:
-        rows = "".join(
-            "<tr><td>%s</td><td class='%s'>%s</td><td>%d</td><td>%.3f</td><td>%s</td></tr>"
-            % (("%s %s" % (p.get("code"), p.get("name") or "")).strip(),
-               "up" if p.get("action") == "BUY" else "down",
-               "买入" if p.get("action") == "BUY" else "卖出",
-               int(p.get("shares") or 0), float(p.get("signal_price") or 0),
-               (p.get("reason") or "")[:60]) for p in plans)
-        parts.append("<h3>明日计划单（%d 条）</h3><table>"
-                     "<tr><th>标的</th><th>方向</th><th>股数</th><th>信号价</th><th>理由</th></tr>"
-                     "%s</table>" % (len(plans), rows))
+    if plans or watch:
+        plans = plans or []
+        def _pdate(p):
+            """执行日：新数据有 for_date，老数据退回 signal_date。"""
+            return str(p.get("for_date") or p.get("signal_date") or "-")
+
+        buys = [p for p in plans if (p.get("action") or "").upper() == "BUY"]
+        sells = [p for p in plans if (p.get("action") or "").upper() != "BUY"]
+        dates = sorted({_pdate(p) for p in plans if _pdate(p) != "-"})
+
+        def _table(items, title):
+            if not items:
+                return ""
+            rows = "".join(
+                "<tr><td>%s</td><td class='%s'>%s</td><td>%d</td><td>%.3f</td>"
+                "<td>%s</td><td>%s</td></tr>"
+                % (("%s %s" % (p.get("code"), p.get("name") or "")).strip(),
+                   "up" if (p.get("action") or "").upper() == "BUY" else "down",
+                   "买入" if (p.get("action") or "").upper() == "BUY" else "卖出",
+                   int(p.get("shares") or 0), float(p.get("signal_price") or 0),
+                   _pdate(p), (p.get("reason") or "")[:60]) for p in items)
+            return ("<h3>%s（%d 条）</h3><table>"
+                    "<tr><th>标的</th><th>方向</th><th>股数</th><th>信号价</th>"
+                    "<th>执行日</th><th>理由</th></tr>%s</table>"
+                    % (title, len(items), rows))
+
+        if dates:
+            parts.append("<div class='sub'>明日执行计划，执行日 %s</div>" % "、".join(dates))
+        if buys:
+            parts.append(_table(buys, "买入计划单"))
+        if sells:
+            parts.append(_table(sells, "卖出计划单"))
+        if not buys and not sells:
+            parts.append("<h3>买入 / 卖出计划单</h3><div class='sub'>"
+                         "无买卖指令：AI 判断明日不开新仓、持仓也未到止损/时间止损"
+                         "（空仓也是一种决策）。</div>")
+        witems = (watch or {}).get("items") or []
+        if witems:
+            wrows = "".join(
+                "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                % (("%s %s" % (i.get("code"), i.get("name") or "")).strip(),
+                   i.get("priority") or "-", i.get("reason") or "-",
+                   i.get("trigger") or "-") for i in witems)
+            parts.append("<h3>明日待观察 / 看好名单（%d 只 %s）</h3><table>"
+                         "<tr><th>标的</th><th>优先级</th><th>关注理由</th>"
+                         "<th>触发条件</th></tr>%s</table>"
+                         % (len(witems), (watch or {}).get("for_date") or "", wrows))
     else:
-        parts.append("<h3>明日计划单</h3><div class='sub'>无（AI 判断明日不动作，空仓也是一种决策）</div>")
+        parts.append("<h3>明日计划单</h3><div class='sub'>"
+                     "今日无新计划单：AI 判断明日不开新仓 / 暂无合格标的（空仓也是一种决策）。"
+                     "上一批计划单已执行完毕或已归档。</div>")
     if advices:
         def _f(a):
             """数据是中文键（建议/触发位/理由），兼容英文旧键。"""

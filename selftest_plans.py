@@ -19,13 +19,15 @@ if os.path.exists(STATE):
 if os.path.exists(PLANS):
     shutil.copy(PLANS, BAK_PLANS)
 
-def write_plan(stop=6.33, shares=700, price=6.54):
+def write_plan(stop=6.33, shares=700, price=6.54, for_date=None):
     os.makedirs(os.path.dirname(PLANS), exist_ok=True)
-    json.dump([{"signal_date": yesterday, "signal_time": "15:00:00",
-                "code": "600015", "name": "华夏银行", "action": "BUY",
-                "shares": shares, "signal_price": price, "stop": stop,
-                "target": None, "reason": "自检用计划单"}],
-              io.open(PLANS, "w", encoding="utf-8"), ensure_ascii=False)
+    pl = {"signal_date": yesterday, "signal_time": "15:00:00",
+          "code": "600015", "name": "华夏银行", "action": "BUY",
+          "shares": shares, "signal_price": price, "stop": stop,
+          "target": None, "reason": "自检用计划单"}
+    if for_date:
+        pl["for_date"] = for_date
+    json.dump([pl], io.open(PLANS, "w", encoding="utf-8"), ensure_ascii=False)
 
 def fake_quote(open_px, price=None):
     def q(code):
@@ -39,8 +41,11 @@ def fake_quote(open_px, price=None):
 
 orig = feed.get_quote
 
-def run_case(name, open_px, stop=6.33, shares=700, price=6.54, expect="buy"):
-    write_plan(stop, shares, price)
+def run_case(name, open_px, stop=6.33, shares=700, price=6.54, expect="buy",
+             for_date=None, fresh=False):
+    if fresh and os.path.exists(STATE):
+        os.remove(STATE)                  # 每个涉及额度上限的用例都从空仓开始
+    write_plan(stop, shares, price, for_date=for_date)
     feed.get_quote = fake_quote(open_px)
     t = ai_agent.AITrader(CFG)
     before = len(t.broker.state["trades"])
@@ -51,7 +56,7 @@ def run_case(name, open_px, stop=6.33, shares=700, price=6.54, expect="buy"):
     after = len(t.broker.state["trades"])
     filled = after > before
     ok = (expect == "buy" and filled) or (expect == "cancel" and not filled)
-    print("%s %-28s 开盘%.2f → %s  (%s)" % ("✔" if ok else "✘", name, open_px,
+    print("%s %-34s 开盘%.2f → %s  (%s)" % ("✔" if ok else "✘", name, open_px,
           "已成交" if filled else "未成交", (res[0] if res else "无动作")[:60]))
     return ok
 
@@ -61,6 +66,19 @@ oks.append(run_case("正常小幅高开", 6.60, expect="buy"))
 oks.append(run_case("平开", 6.54, expect="buy"))
 oks.append(run_case("高开超过 1.5%（应取消）", 6.72, expect="cancel"))
 oks.append(run_case("开盘即跌破止损（应取消）", 6.30, expect="cancel"))
+# 执行日归属：今天到期→执行；明天到期→留在文件里等明天
+today = datetime.now().strftime("%Y-%m-%d")
+tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+oks.append(run_case("执行日=今天（盘前计划单应成交）", 6.60, expect="buy", for_date=today,
+                    fresh=True))
+oks.append(run_case("执行日=明天（明日计划单不该提前）", 6.60, expect="cancel",
+                    for_date=tomorrow, fresh=True))
+left = json.load(io.open(PLANS, encoding="utf-8"))
+keep = bool(left) and left[0].get("for_date") == tomorrow
+print("%s %-34s 计划单仍在文件中（%d 条，执行日 %s）"
+      % ("✔" if keep else "✘", "未到期计划单保留",
+         len(left), left[0].get("for_date") if left else "-"))
+oks.append(keep)
 
 # 清理：恢复账户与计划单（有备份则还原，没有则删除测试残留）
 if os.path.exists(STATE):
