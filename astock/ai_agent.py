@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -49,6 +50,11 @@ RAILS_DEFAULT = {
     "forbid_sell_pct": -8.0,         # 当日跌幅超过该值不卖（避免恐慌盘割在地板）
     "lot": 100,
     "min_shares": 100,               # 最小开仓股数（少于此手续费不经济）
+    # 成本与节奏控制（2026-11 复盘：小额单被 5 元最低佣金吃掉 1~2%）
+    "max_new_symbols_per_day": 3,    # 每日「新建仓标的」上限；0=不限
+    "min_order_amount": 5000.0,      # 单笔金额下限（元）；0=不限
+    "max_commission_pct": 0.15,      # 佣金占单笔金额上限 %（据此反推金额下限）
+    "min_reward_risk": 2.0,          # 入场目标价至少 2R（赚小亏大是主因）
     # 组合级风控（AI 自己在复盘里提出的：单笔合规不等于组合合规）
     "max_total_risk_pct": 3.0,       # 全部持仓「到止损的距离」之和占总资金上限
 }
@@ -189,13 +195,36 @@ class RiskRails:
         c = self.cfg
         cap = self.trades_cap(c)
         trade_txt = ("每日不限笔数" if cap is None else "每日最多%.0f笔" % cap)
+        extra = []
+        new_cap = float(c.get("max_new_symbols_per_day") or 0)
+        if new_cap > 0:
+            extra.append("每日新建仓≤%d只" % int(new_cap))
+        min_amt = float(c.get("min_order_amount") or 0)
+        if min_amt > 0:
+            extra.append("单笔≥%.0f元" % min_amt)
+        extra.append("同一标的当日只建仓一次")
+        extra.append("浮盈1R移保本/1.5R后跟踪止损")
         return ("单股≤%.0f%%｜总仓≤%.0f%%｜%s｜单笔风险≤%.1f%%｜组合风险≤%.1f%%｜"
-                "当日亏损>%.0f%%即停止开仓｜价格区间 %.1f~%.1f 元｜委托价偏离≤%.1f%%"
+                "当日亏损>%.0f%%即停止开仓｜价格区间 %.1f~%.1f 元｜委托价偏离≤%.1f%%｜%s"
                 % (c["max_position_pct"], c["max_total_position_pct"],
                    trade_txt, c["max_risk_per_trade_pct"],
                    c.get("max_total_risk_pct", 3.0),
                    c["daily_loss_limit_pct"], c["min_price"], c["max_price"],
-                   c["price_band_pct"]))
+                   c["price_band_pct"], "｜".join(extra)))
+
+    def amount_floors(self):
+        """单笔金额的下限：(理想下限, 硬下限)。
+
+        · 理想下限 = min_order_amount（默认 5000 元）——能凑到就凑；
+        · 硬下限   = 由 max_commission_pct 反推（5 元佣金占比 ≤0.15% → 约 3333 元）；
+        仓位/风险额度只够到「硬下限」以上时接受额度上限，低于硬下限才放弃，
+        否则「单笔风险 1.5% + 止损 4.5%」和「单笔 5000 元」会互相锁死、什么都买不了。
+        """
+        c = self.cfg
+        ideal = float(c.get("min_order_amount") or 0)
+        max_comm = float(c.get("max_commission_pct") or 0)
+        hard = (5.0 / (max_comm / 100.0)) if max_comm > 0 else 0.0
+        return max(ideal, hard), hard
 
     def check(self, order, snap, quote, day_state, cap_override=None, force_open=False):
         """返回 (ok, reason, shares)。order 为 AI 给出的原始指令。"""
@@ -230,25 +259,41 @@ class RiskRails:
                 return False, "当日已涨 %.1f%%，禁止追高买入" % (quote.get("pct") or 0), 0
             if shares <= 0:
                 return False, "买入股数为 0", 0
+            # ── 节奏控制①：同一标的当日只建仓一次；再加仓必须站上「加仓触发价」 ──
+            # （2026-11 复盘：每 30 分钟一轮决策会把同一只票反复小额补仓，成本失控）
+            if not force_open:
+                bought = day_state.get("bought_today") or {}
+                cnt = int(bought.get(code) or 0)
+                if cnt > 0 or pos is not None:
+                    trig = (day_state.get("add_trigger") or {}).get(code)
+                    px_now = float(px or 0)
+                    if not trig or px_now < float(trig):
+                        if cnt > 0:
+                            return False, ("同一标的当日只建仓一次（%s 今日已买 %d 次）；"
+                                           "继续加仓需站上人工设定的加仓触发价" % (code, cnt)), 0
+                        return False, ("%s 已有持仓，加仓需站上人工设定的加仓触发价" % code), 0
+                    if cnt >= 2:
+                        return False, "同一标的当日最多建仓 1 次 + 加仓 1 次（%s）" % code, 0
+            # ── 节奏控制②：每日新建仓标的数量上限 ──
+            new_cap = float(c.get("max_new_symbols_per_day") or 0)
+            if new_cap > 0 and not force_open:
+                bought = day_state.get("bought_today") or {}
+                if code not in bought and pos is None and len(bought) >= int(new_cap):
+                    return False, ("今日新建仓标的已达 %d 只上限（%s），不再开新标的"
+                                   % (int(new_cap), "、".join(sorted(bought)[:6]))), 0
             shares = int(shares // c["lot"] * c["lot"])
-            # 单股仓位上限
+            # 仓位额度（单股上限 ∩ 总仓上限）
             cur_val = (pos["market_value"] if pos else 0.0)
             cap_pct = min(c["max_position_pct"],
                           float(cap_override) if cap_override else 999)
-            max_val = self.capital * cap_pct / 100
-            add_val = shares * px
-            if cur_val + add_val > max_val + 1:
-                shares = int(((max_val - cur_val) / px) // c["lot"] * c["lot"])
-                if shares <= 0:
-                    return False, "已达单股仓位上限 %.0f%%（含大盘温度收紧）" % cap_pct, 0
-            # 总仓位上限
-            total_val = snap["market_value"]
-            max_total = self.capital * c["max_total_position_pct"] / 100
-            if total_val + shares * px > max_total + 1:
-                shares = int(((max_total - total_val) / px) // c["lot"] * c["lot"])
-                if shares <= 0:
-                    return False, "已达总仓位上限 %.0f%%" % c["max_total_position_pct"], 0
-            # 风险预算
+            room_pos = self.capital * cap_pct / 100 - cur_val
+            room_total = self.capital * c["max_total_position_pct"] / 100 - snap["market_value"]
+            if room_pos <= 0:
+                return False, "已达单股仓位上限 %.0f%%（含大盘温度收紧）" % cap_pct, 0
+            if room_total <= 0:
+                return False, "已达总仓位上限 %.0f%%" % c["max_total_position_pct"], 0
+            shares_cap = int((min(room_pos, room_total) / px) // c["lot"] * c["lot"])
+            # 风险预算（单笔）
             stop = order.get("stop") or (quote.get("low") or px)
             if stop >= px:
                 return False, "止损价 %.2f 不低于买入价 %.2f，指令无效" % (stop, px), 0
@@ -256,17 +301,30 @@ class RiskRails:
             max_by_risk = int((budget / (px - stop)) // c["lot"] * c["lot"])
             if max_by_risk <= 0:
                 return False, "止损距离过宽，单笔风险超预算", 0
-            if shares > max_by_risk:
-                shares = max_by_risk
             # 现金
             cash = snap["cash"]
-            if shares * px * 1.001 > cash:
-                shares = int((cash / (px * 1.001)) // c["lot"] * c["lot"])
-                if shares <= 0:
-                    return False, "现金不足", 0
+            max_by_cash = int((cash / (px * 1.001)) // c["lot"] * c["lot"])
+            allow_max = min(shares_cap, max_by_risk, max_by_cash)
+            if allow_max <= 0:
+                return False, "仓位/风险/现金额度只够 0 手，放弃", 0
+            shares = min(shares, allow_max)
             if shares < int(c.get("min_shares", 100)):
                 return False, "算下来只能买 %d 股（< %d 股），手续费不经济，放弃本次开仓" % (
                     shares, int(c.get("min_shares", 100))), 0
+            # ── 成本控制：单笔金额下限（5 元最低佣金在 250 元单子上是 2%，来回 4%）──
+            min_amt, hard_min = self.amount_floors()
+            if min_amt > 0:
+                need = int(math.ceil(min_amt / (px * c["lot"]))) * c["lot"]
+                if shares < need:
+                    if need <= allow_max:
+                        # 额度够、只是报少了 → 补到金额下限（宁可买够也不做 250 元的小单）
+                        shares = need
+                    elif allow_max * px >= hard_min:
+                        # 仓位/风险额度受限，但仍在硬下限之上 → 接受额度上限
+                        shares = allow_max
+                    else:
+                        return False, ("单笔金额 %.0f 元 < 下限 %.0f 元（额度只够 %d 股），"
+                                       "最低佣金占比过高，放弃" % (shares * px, min_amt, shares)), 0
             # 组合级风险预算：已有持仓「到止损的距离」+ 本次新增，不得超过上限
             risk_pct = float(c.get("max_total_risk_pct", 3.0))
             if force_open:                       # 用户手动授权：组合风险预算放宽
@@ -289,6 +347,9 @@ class RiskRails:
                 if shares < int(c.get("min_shares", 100)):
                     return False, ("组合风险预算只剩 %.0f 元，只能买 %d 股，不经济，放弃"
                                    % (room, shares)), 0
+            if min_amt > 0 and shares * px < hard_min:
+                return False, ("组合风险额度只够买 %.0f 元（< 硬下限 %.0f 元），"
+                               "最低佣金占比过高，放弃" % (shares * px, hard_min)), 0
             return True, "过风控（%d 股，本笔风险 %.0f 元 / 组合 %.0f+%.0f=%.0f 元，上限 %.0f）" % (
                 shares, new_risk, used, new_risk, used + new_risk, total_budget), shares
 
@@ -347,6 +408,17 @@ class AITrader:
                        "meta": meta or {}}, f, ensure_ascii=False, indent=1)
         self.watchlist = codes
 
+    def _add_triggers(self):
+        """人工设定的加仓触发价（config.symbols.<code>.add_trigger）。"""
+        out = {}
+        try:
+            for c_, v in ((self.cfg or {}).get("symbols") or {}).items():
+                if isinstance(v, dict) and v.get("add_trigger"):
+                    out[c_] = float(v["add_trigger"])
+        except Exception:                              # noqa: BLE001
+            out = {}
+        return out
+
     def _day_state(self, snap):
         today = datetime.now().strftime("%Y-%m-%d")
         trades_today = [t for t in self.broker.state["trades"] if t["ts"].startswith(today)]
@@ -357,9 +429,18 @@ class AITrader:
                 break
         ref = open_eq if open_eq else self.broker.state["capital"]
         loss_pct = (ref - snap["equity"]) / ref * 100 if ref else 0
+        # 今日已买入的标的与次数（用于「同一标的当日只建仓一次」）
+        bought_today = {}
+        for t in trades_today:
+            if (t.get("side") or "").upper() == "BUY":
+                bought_today[t["code"]] = bought_today.get(t["code"], 0) + 1
+        # 人工设定的加仓触发价（config.symbols.<code>.add_trigger）
+        add_trigger = self._add_triggers()
         return {"trades": len(trades_today),
                 "loss_pct": round(loss_pct, 2),
-                "loss_limit_hit": loss_pct >= self.rails.cfg["daily_loss_limit_pct"]}
+                "loss_limit_hit": loss_pct >= self.rails.cfg["daily_loss_limit_pct"],
+                "bought_today": bought_today,
+                "add_trigger": add_trigger}
 
     # ---------------- 上下文 ----------------
     def _bars_brief(self, code, n=None):
@@ -540,6 +621,12 @@ class AITrader:
         if verbose:
             print(color("\n【② 操盘决策】收集盘面数据…", "bold"))
         snap = self._snapshot()
+        # 移动止损：先把浮盈保护起来（保本 / 跟踪），再让模型看最新止损
+        try:
+            if self._apply_trailing_stops(verbose):
+                snap = self._snapshot()
+        except Exception as exc:                       # noqa: BLE001
+            print(color("  （移动止损计算失败：%s）" % exc, "grey"))
         day = self._day_state(snap)
         if force_open:
             day["force_open"] = True
@@ -740,6 +827,19 @@ class AITrader:
             "开仓节奏(代码统计)": _idle_state(),
             "参与度设定(用户偏好，必须遵守)": _participation_brief(self.cfg),
             "持有模式(用户偏好，代码会强制)": holdmode.brief(self.ai_cfg),
+            "成本与节奏控制(代码已生效，不可绕过)": {
+                "同一标的当日只建仓一次": "再加仓必须站上 config 里人工设的「加仓触发价」；"
+                                    "不要同一只票反复小额买",
+                "每日新建仓标的数": "≤%s 只" % (int(float((self.rails.cfg or {}).get(
+                    "max_new_symbols_per_day") or 0)) or "不限"),
+                "单笔金额下限": "≥%.0f 元（5 元最低佣金在 250 元单子上就是 2%%，来回 4%%）"
+                          % float((self.rails.cfg or {}).get("min_order_amount") or 0),
+                "移动止损": "浮盈 1R 后止损自动移到成本，1.5R 后按「最高价−1R」跟踪；"
+                        "你不用管保本，但必须给足止损空间",
+                "盈亏比": "目标价会被拉到 ≥%.1fR（R=入场价−止损）：赚一点就跑、亏了扛着"
+                       "是上一阶段最大的亏损来源" % float(
+                           (self.rails.cfg or {}).get("min_reward_risk") or 0),
+            },
             "持仓": positions,
             "观察池": watch,
             "要求": {
@@ -931,12 +1031,73 @@ class AITrader:
                                   extra={"index": self._index_close()})
         return data
 
+    def _fix_reward_risk(self, order, px):
+        """把目标价拉到 ≥ min_reward_risk × 止损距离（只影响记录与提醒，不改股数）。
+
+        2026-11 复盘：赢 28.95 / 亏 60.08，盈亏比 0.48 —— 「赚一点就跑、亏了扛着」。
+        真正保护浮盈靠移动止损（_apply_trailing_stops），这里先把目标价写成真实可期的数。
+        """
+        rr = float((self.rails.cfg or {}).get("min_reward_risk") or 0)
+        stop = order.get("stop")
+        if rr <= 0 or not stop or not px or float(stop) >= px:
+            return order
+        R = px - float(stop)
+        floor = px + rr * R
+        try:
+            tgt = float(order.get("target") or 0)
+        except (TypeError, ValueError):
+            tgt = 0.0
+        if tgt < floor:
+            order["target"] = round(floor, 2)
+            print(color("  ⓘ 目标价按 %.1fR 修正为 %.2f（原 %s；浮盈由移动止损保护）"
+                        % (rr, order["target"], order.get("target") if tgt else "未给"), "grey"))
+        return order
+
+    def _apply_trailing_stops(self, verbose=True):
+        """移动止损（代码强制，不依赖模型）。
+
+        · 浮盈 ≥ 1R（R=入场价−初始止损）→ 止损上移到成本（保本，不再让盈利单变亏损单）；
+        · 浮盈 ≥ 1.5R → 止损改为「期内最高价 − 1R」，之后随最高价上移；
+        · 止损只上移不下移。
+
+        这是修正「盈亏比 0.48」的主手段：亏损单按原止损截断，盈利单不被迫坐回成本。
+        """
+        changed = []
+        for code, p in (self.broker.state.get("positions") or {}).items():
+            entry = float(p.get("cost") or 0)
+            stop = float(p.get("stop") or 0)
+            px = float(p.get("last_price") or p.get("high_since") or 0)
+            high = float(p.get("high_since") or px or 0)
+            if entry <= 0 or stop <= 0 or px <= 0:
+                continue
+            R = entry - stop
+            if R <= 0:
+                continue
+            new_stop = stop
+            if high >= entry + 1.5 * R:
+                new_stop = max(new_stop, high - R)
+            elif high >= entry + R:
+                new_stop = max(new_stop, entry)
+            if new_stop > stop + 1e-9:
+                p["stop"] = round(new_stop, 2)
+                changed.append((code, p.get("name") or "", stop, p["stop"], high))
+        if changed:
+            self.broker.save() if hasattr(self.broker, "save") else None
+            if verbose:
+                for code, name, old, new, high in changed:
+                    print(color("  ↑ 移动止损 %s %s：%.2f → %.2f（期内最高 %.2f）"
+                                % (code, name, old, new, high), "grey"))
+        return changed
+
     def _trial_candidates(self, watch, day, snap=None, need=3, exclude=None):
         """均衡/积极档强制参与：挑出 need 只满足硬条件的试错仓。
 
         准入（代码判定）：评分 ≥ trial_min_score、评分变化 ≥ trial_min_score_chg、
-        板块不弱势、止损距离 ≤8%、单笔风险 ≤ 均分后的剩余预算、现金买得起一手。
-        风险预算按「本次还需几只」均分，保证 3 只都能落地而不互相挤占。
+        板块不弱势、止损距离 ≤8%、单笔风险 ≤ 均分后的剩余预算、现金买得起一手、
+        **且不是已有持仓/今日已买过的标的**、**单笔金额 ≥ min_order_amount**。
+
+        2026-11 复盘教训：这段补位逻辑原来不排除已有持仓，导致同一只票每 30 分钟
+        被小额加一次（一天 6 笔 250~500 元的单子，佣金单向 1~2%）。
         exclude：AI 已经给出 BUY 的代码，避免同一只票重复下两张计划单。
         """
         exclude = exclude or set()
@@ -961,6 +1122,9 @@ class AITrader:
         if remain <= 0 or need <= 0:
             return []
         cands = []
+        # 已有持仓 / 今日已买过的标的：补位逻辑不能再碰（2026-11 复盘：同一只票被反复小额加仓）
+        held = {str(p.get("code") or "") for p in (snap.get("positions") or [])}
+        bought_today = {str(k) for k in (day.get("bought_today") or {})}
         for it in watch or []:
             code = it.get("code")
             px = it.get("现价") or it.get("price")
@@ -970,6 +1134,8 @@ class AITrader:
                 continue
             if str(code) in exclude:          # AI 已经买过这只，不再重复补计划
                 continue
+            if str(code) in held or str(code) in bought_today:
+                continue                      # 已有持仓或今日已建仓 → 不再补
             if it.get("⚠板块"):
                 continue
             if sc is None or float(sc) < float(ai.get("trial_min_score", 50)):
@@ -978,6 +1144,10 @@ class AITrader:
                 continue
             cands.append((float(sc) * 10 + float(chg or 0), str(code), it))
         cands.sort(key=lambda x: -x[0])
+        # 单笔金额下限（和风控同口径）
+        min_amt, hard_min = self.rails.amount_floors()
+        new_cap = float(c.get("max_new_symbols_per_day") or 0)
+        room_new = (int(new_cap) - len(bought_today)) if new_cap > 0 else 10 ** 6
         out = []
         for _k, code, it in cands:
             if len(out) >= need:
@@ -1006,8 +1176,19 @@ class AITrader:
             shares = int(shares // lot * lot)
             if shares < lot:
                 continue
+            # 金额下限：不够就提到下限（额度允许时），否则看是否还在硬下限之上
+            if min_amt > 0:
+                need_sh = int(math.ceil(min_amt / (px * lot))) * lot
+                if shares < need_sh:
+                    if need_sh <= min(max_by_risk, max_by_cash):
+                        shares = need_sh
+                    elif shares * px < hard_min:
+                        continue
+            if room_new <= 0:
+                break
             cash -= shares * px
             remain -= risk_ps * shares
+            room_new -= 1
             out.append({"code": code, "name": it.get("name") or "", "action": "BUY",
                         "shares": shares, "limit_price": round(px, 3), "stop": stop,
                         "reason": ("均衡档试错仓（代码强制参与）：评分 %s、变化 %s、"
@@ -1029,6 +1210,19 @@ class AITrader:
         #   · 买单 → 用预计（卖出后）快照校验，否则今天的满仓会把明天本可以做的买入全拒掉；
         #   · 卖单 → 仍用实时快照校验（预计快照里这些票已经算卖掉了）。
         proj_snap = day.get("projected_snap") if deferred else None
+        # 计划阶段的「今日已买」= 该执行日已排上的买入计划（保证「每日新建仓标的数」在计划层就生效）
+        planned_date = self._plan_for_date(bool(day.get("force_plan"))) if deferred else None
+
+        def _planned_buys():
+            cnt = {}
+            for p in self._load_plans():
+                if self._plan_exec_date(p) == planned_date and \
+                        (p.get("action") or "").upper() == "BUY":
+                    cnt[p.get("code")] = cnt.get(p.get("code"), 0) + 1
+            return cnt
+
+        if deferred and day.get("force_plan"):
+            day["bought_today"] = _planned_buys()
         for a in actions:
             code = str(a.get("code") or "")
             act = (a.get("action") or "").upper()
@@ -1081,6 +1275,9 @@ class AITrader:
             if act == "BUY" and day.get("force_open"):
                 reason = ("【用户手动授权开仓】" + (reason or ""))[:120]
                 a["reason"] = reason
+            if act == "BUY":
+                # 盈亏比：目标价至少 min_reward_risk × R（止损距离），否则记录里的目标是假的
+                a = self._fix_reward_risk(a, float(a.get("limit_price") or q.get("price") or 0))
             if act == "HOLD":
                 held = code in {p["code"] for p in snap["positions"]}
                 msg = ("持有 %s：%s" if held else "观望 %s（无持仓）：%s") % (code, reason)
@@ -1093,6 +1290,8 @@ class AITrader:
                 self._add_plan(code, name, act, shares, q.get("price"),
                                a.get("stop"), a.get("target"), reason,
                                for_date=for_date)
+                if (act or "").upper() == "BUY" and day.get("force_plan"):
+                    day["bought_today"] = _planned_buys()   # 计划层也按「每日新建仓标的数」计
                 msg = ("计划 %s %s %d 股（信号价 %.3f）→ 已存入计划单，执行日 %s 开盘按规则执行"
                        % (code, act, shares, q.get("price") or 0, for_date))
                 print(color("  ⏳ " + msg, "yellow"))
@@ -1245,26 +1444,41 @@ class AITrader:
         return summary, proj_snap
 
     def _time_stop_actions(self, snap, force_plan=False):
-        """把「持有到期」的持仓变成强制卖出动作。
+        """把「必须卖」的持仓变成强制卖出动作（代码层，不听模型）。
 
-        盘中（force_plan=False）：持有已达上限 N 天 → 立刻卖；
-        收盘计划阶段（force_plan=True）：持有已达 N-1 天 → 排明日开盘卖出的计划单，
-        这样正好在第 N 个交易日了结，不会把短线拖成中线。
+        两种触发：
+        ① 跌破止损价（硬性，现价 ≤ 止损）；
+        ② 持有到期：盘中已满上限 N 天 → 立刻卖；收盘计划阶段满 N-1 天 → 排明日开盘卖出，
+           正好在第 N 个交易日了结，不会把短线拖成中线。
         """
         cap = holdmode.max_hold_days(self.ai_cfg)
         need = max(1, cap - 1) if force_plan else cap
         out = []
         for p in (snap or {}).get("positions") or []:
             code = str(p.get("code") or "")
-            held = holdmode.trading_days_held(p.get("entry_date"))
-            if not code or not held or held < need:
+            if not code:
                 continue
             shares = int(p.get("available") or 0)
             if shares <= 0:                     # T+1 不可卖，明天再说
                 continue
+            px = p.get("price")
+            stop = p.get("stop")
+            # ① 跌破止损 → 无条件卖
+            if stop and px and float(px) <= float(stop):
+                out.append({"code": code, "name": p.get("name") or "",
+                            "action": "SELL", "shares": shares,
+                            "limit_price": px, "stop": None, "target": None,
+                            "held": holdmode.trading_days_held(p.get("entry_date")) or 0,
+                            "reason": "跌破止损 %.2f（现价 %.2f），无条件卖出"
+                                      % (float(stop), float(px))})
+                continue
+            # ② 时间止损
+            held = holdmode.trading_days_held(p.get("entry_date"))
+            if not held or held < need:
+                continue
             out.append({"code": code, "name": p.get("name") or "",
                         "action": "SELL", "shares": shares,
-                        "limit_price": p.get("price"), "stop": None, "target": None,
+                        "limit_price": px, "stop": None, "target": None,
                         "held": held,
                         "reason": "时间止损：%s模式最多持有 %d 个交易日，已持有 %d 日"
                                   % (holdmode.label(self.ai_cfg), cap, held)})
@@ -1488,7 +1702,8 @@ class AITrader:
             print(color("\n【执行计划】待执行 %d 条（执行日≤%s；开盘价偏离 >%.1f%% 或跳空跌破止损则取消）"
                         % (len(plans), today, cancel_pct), "bold"))
         snap = self._snapshot()
-        day = {"trades": 0, "loss_pct": 0.0, "loss_limit_hit": False}
+        day = {"trades": 0, "loss_pct": 0.0, "loss_limit_hit": False,
+               "bought_today": {}, "add_trigger": self._add_triggers()}
         remaining, results = [], []
         for pl in plans:
             if self._plan_exec_date(pl) > today:     # 还没到执行日（明日计划单）
@@ -1539,6 +1754,9 @@ class AITrader:
             results.append(("%s " % ("✔" if ok2 else "✘")) + "%s %s" % (code, msg))
             if ok2:
                 day["trades"] += 1
+                if pl["action"] == "BUY":
+                    day.setdefault("bought_today", {})
+                    day["bought_today"][code] = day["bought_today"].get(code, 0) + 1
                 snap = self._snapshot()
                 notify.beep("warn")
         self._save_plans(remaining)

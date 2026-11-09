@@ -39,3 +39,4 @@ deploy_*.py
 sync_*.py
 replay*.log
 *_err.log
+_*.sh

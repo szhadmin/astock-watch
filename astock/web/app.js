@@ -650,6 +650,9 @@ const App = (() => {
         <span class="tag">单笔风险 ≤${rs.max_risk_per_trade_pct}%</span>
         <span class="tag warn">组合风险 ≤${rs.max_total_risk_pct || 2}%</span>
         <span class="tag warn">当日亏 ${rs.daily_loss_limit_pct}% 停手</span>
+        <span class="tag">${(+rs.max_new_symbols_per_day > 0) ? '每日新建仓 ≤' + rs.max_new_symbols_per_day + ' 只' : '新建仓数量不限'}</span>
+        <span class="tag">${(+rs.min_order_amount > 0) ? '单笔 ≥' + rs.min_order_amount + ' 元' : '单笔金额不限'}</span>
+        <span class="tag">同标的当日只建仓一次</span>
       </div>
       <div class="row" style="margin-top:12px">
         <button class="btn primary" onclick="App.run('decide')">立即决策</button>

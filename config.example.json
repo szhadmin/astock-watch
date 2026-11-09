@@ -100,7 +100,11 @@
       "max_price": 40.0,
       "price_band_pct": 2.5,
       "forbid_buy_pct": 8.0,
-      "forbid_sell_pct": -8.0
+      "forbid_sell_pct": -8.0,
+      "max_new_symbols_per_day": 3,
+      "min_order_amount": 5000.0,
+      "max_commission_pct": 0.15,
+      "min_reward_risk": 2.0
     },
     "schedule": {
       "_说明": "Web 服务与 --loop 的自动调度（仅交易时段动作）：决定/执行/复盘/选股/次日计划/日报的时间点",

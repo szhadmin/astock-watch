@@ -77,6 +77,12 @@ class PaperBroker:
         for code, p in self.state["positions"].items():
             px = prices.get(code) or p.get("last_price") or p["cost"]
             p["last_price"] = px
+            # 记录持仓期内最高价（移动止损 / 保本止损用）
+            try:
+                hs = float(p.get("high_since") or 0)
+                p["high_since"] = max(hs, float(px))
+            except (TypeError, ValueError):
+                p["high_since"] = px
             val = p["shares"] * px
             mv += val
             detail.append({"code": code, "name": p.get("name", ""), "shares": p["shares"],

@@ -182,9 +182,10 @@ shutil.rmtree(tmp3)
 
 rails0 = ai_agent.RiskRails({"max_trades_per_day": 0}, 15000)
 day_many = {"trades": 99, "loss_pct": 0.0, "loss_limit_hit": False, "sizing": {}}
+snap8 = {"cash": 12000.0, "market_value": 0.0, "equity": 15000.0, "positions": []}
 ok0, why0, sh0 = rails0.check(
-    {"code": "603806", "action": "BUY", "shares": 100, "limit_price": 13.37, "stop": 12.77},
-    proj, quote, day_many)
+    {"code": "603806", "action": "BUY", "shares": 500, "limit_price": 13.37, "stop": 12.77},
+    snap8, quote, day_many)
 check("已成交 99 笔仍允许继续买", ok0, (why0 or "")[:40] + " %d 股" % sh0)
 check("风控文案写明「不限笔数」", "不限" in rails0.describe())
 rails4 = ai_agent.RiskRails({"max_trades_per_day": 4}, 15000)
@@ -192,6 +193,74 @@ ok4, why4, _ = rails4.check(
     {"code": "603806", "action": "BUY", "shares": 100, "limit_price": 13.37, "stop": 12.77},
     proj, quote, day_many)
 check("设回 4 笔时仍然拦得住", (not ok4) and "最大交易笔数" in why4, why4[:30])
+
+print("\n=== 9) 成本与节奏控制（2026-11 复盘的四项修复）===")
+rails_c = ai_agent.RiskRails({}, 15000)
+snap_empty = {"cash": 12000.0, "market_value": 0.0, "equity": 15000.0, "positions": []}
+q = {"code": "002506", "name": "协鑫集成", "price": 2.53, "pct": 0.5,
+     "low": 2.50, "high": 2.56}
+base_day = {"trades": 0, "loss_pct": 0.0, "loss_limit_hit": False}
+BUY = {"code": "002506", "action": "BUY", "shares": 100, "limit_price": 2.53, "stop": 2.42}
+
+# ① 同一标的当日只建仓一次
+d1 = {**base_day, "bought_today": {"002506": 1}, "add_trigger": {}}
+ok9, why9, _ = rails_c.check(dict(BUY), snap_empty, q, d1)
+check("同标的当日已买过 → 拒绝再买", (not ok9) and "只建仓一次" in why9, why9[:34])
+
+# ② 有加仓触发价且已站上 → 放行（但仍受其它上限约束）
+d2 = {**base_day, "bought_today": {"002506": 1}, "add_trigger": {"002506": 2.50}}
+ok9b, why9b, sh9b = rails_c.check(dict(BUY), snap_empty, q, d2)
+check("站上加仓触发价 → 允许加仓一次", ok9b, (why9b or "")[:34] + " %d股" % sh9b)
+
+# ③ 每日新建仓标的数上限（默认 3 只）
+d3 = {**base_day, "bought_today": {"600050": 1, "600988": 1, "600089": 1}, "add_trigger": {}}
+ok9c, why9c, _ = rails_c.check(dict(BUY), snap_empty, q, d3)
+check("今日新建仓已 3 只 → 拒绝第 4 只", (not ok9c) and "新建仓标的已达" in why9c, why9c[:34])
+
+# ④ 单笔金额下限：250 元的小单 → 提到 ≥5000 元，而不是照单执行
+ok9d, why9d, sh9d = rails_c.check(dict(BUY), snap_empty, q, base_day)
+check("小额单被提到 ≥5000 元（不是 250 元的小单）",
+      ok9d and sh9d * 2.53 >= 5000, "%d股 = %.0f元" % (sh9d, sh9d * 2.53))
+# 额度不够时必须放弃
+snap_tiny = {"cash": 300.0, "market_value": 0.0, "equity": 300.0, "positions": []}
+ok9e, why9e, _ = rails_c.check(dict(BUY), snap_tiny, q, base_day)
+check("额度不够凑到下限 → 放弃", (not ok9e) and "下限" in why9e, why9e[:40])
+
+# ⑤ 目标价按 2R 修正
+t9 = object.__new__(ai_agent.AITrader)
+t9.rails = rails_c
+t9.cfg = {"ai": {}}
+t9.ai_cfg = {}
+fixed = t9._fix_reward_risk({"code": "002506", "stop": 2.42, "target": 2.60}, 2.53)
+check("目标价被拉到 ≥2R", abs(fixed["target"] - (2.53 + 2 * (2.53 - 2.42))) < 0.02,
+      "target=%.2f" % fixed["target"])
+
+# ⑥ 移动止损：浮盈 1R 移保本，1.5R 后跟踪
+class _B:
+    state = {"positions": {
+        "A": {"code": "A", "name": "保本档", "cost": 10.0, "stop": 9.5, "last_price": 10.6,
+              "high_since": 10.6, "shares": 100},
+        "B": {"code": "B", "name": "跟踪档", "cost": 10.0, "stop": 9.5, "last_price": 11.8,
+              "high_since": 11.8, "shares": 100},
+        "C": {"code": "C", "name": "未触发", "cost": 10.0, "stop": 9.5, "last_price": 10.2,
+              "high_since": 10.2, "shares": 100},
+    }}
+    def save(self):
+        pass
+t9.broker = _B()
+t9._apply_trailing_stops(verbose=False)
+pA, pB, pC = _B.state["positions"]["A"], _B.state["positions"]["B"], _B.state["positions"]["C"]
+check("浮盈 1R → 止损移到成本（保本）", abs(pA["stop"] - 10.0) < 1e-6, "%.2f" % pA["stop"])
+check("浮盈 1.5R → 止损按最高价−1R 跟踪", abs(pB["stop"] - 11.3) < 1e-6, "%.2f" % pB["stop"])
+check("未到 1R → 止损不动", abs(pC["stop"] - 9.5) < 1e-6, "%.2f" % pC["stop"])
+
+# ⑦ 跌破止损 → 代码强制卖出
+snap_stop = {"positions": [{"code": "002506", "name": "协鑫集成", "shares": 1600,
+                            "available": 1600, "entry_date": today,
+                            "price": 2.40, "stop": 2.42}]}
+forced = t9._time_stop_actions(snap_stop, force_plan=False)
+check("跌破止损 → 强制卖出", bool(forced) and forced[0]["action"] == "SELL" and
+      "跌破止损" in forced[0]["reason"], (forced[0]["reason"][:30] if forced else "无"))
 
 print("\n结论：%s" % ("全部通过" if ok else "有用例未通过"))
 sys.exit(0 if ok else 1)

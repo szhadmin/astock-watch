@@ -41,10 +41,11 @@ def fake_quote(open_px, price=None):
 
 orig = feed.get_quote
 
-def run_case(name, open_px, stop=6.33, shares=700, price=6.54, expect="buy",
+def run_case(name, open_px, stop=6.33, shares=800, price=6.54, expect="buy",
              for_date=None, fresh=False):
-    if fresh and os.path.exists(STATE):
-        os.remove(STATE)                  # 每个涉及额度上限的用例都从空仓开始
+    # 每个用例都从空账户开始：否则「同一标的当日只建仓一次」会把后面的用例挡掉
+    if os.path.exists(STATE):
+        os.remove(STATE)
     write_plan(stop, shares, price, for_date=for_date)
     feed.get_quote = fake_quote(open_px)
     t = ai_agent.AITrader(CFG)
