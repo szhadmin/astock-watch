@@ -646,7 +646,7 @@ const App = (() => {
       <div class="row">
         <span class="tag">单股 ≤${rs.max_position_pct}%</span>
         <span class="tag">总仓 ≤${rs.max_total_position_pct}%</span>
-        <span class="tag">每日 ≤${rs.max_trades_per_day} 笔</span>
+        <span class="tag">${(+rs.max_trades_per_day > 0) ? '每日 ≤' + rs.max_trades_per_day + ' 笔' : '每日笔数不限'}</span>
         <span class="tag">单笔风险 ≤${rs.max_risk_per_trade_pct}%</span>
         <span class="tag warn">组合风险 ≤${rs.max_total_risk_pct || 2}%</span>
         <span class="tag warn">当日亏 ${rs.daily_loss_limit_pct}% 停手</span>
@@ -2039,7 +2039,7 @@ const App = (() => {
           <div class="row2">
             ${rail('max_position_pct', '单股仓位上限 %')}
             ${rail('max_total_position_pct', '总仓位上限 %')}
-            ${rail('max_trades_per_day', '每日最大交易笔数')}
+            ${rail('max_trades_per_day', '每日最大交易笔数（0=不限）')}
             ${rail('max_risk_per_trade_pct', '单笔风险上限 %')}
             ${rail('daily_loss_limit_pct', '当日亏损熔断 %')}
             ${rail('price_band_pct', '委托价偏离上限 %')}

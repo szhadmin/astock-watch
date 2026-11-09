@@ -163,5 +163,35 @@ check("其他执行日不受影响", any(p["for_date"] == "2026-11-09" for p in 
 t2._save_plans([])
 shutil.rmtree(tmp2)
 
+print("\n=== 8) 每日交易笔数 = 0 → 不限制 ===")
+tmp3 = tempfile.mkdtemp()
+ai_agent.PLANS_DIR = tmp3
+t3 = object.__new__(ai_agent.AITrader)
+class _R3:
+    cfg = {"max_trades_per_day": 0}
+t3.rails = _R3()
+t3.cfg = {"ai": {}}
+t3.ai_cfg = {}
+many = [{"for_date": "2026-11-06", "code": "00000%d" % i, "action": "BUY", "shares": 100}
+        for i in range(6)]
+t3._save_plans(many)
+out3 = t3._trim_plans_to_trade_cap("2026-11-06")
+check("0=不限：6 条计划全部保留", len(out3) == 6, "%d 条" % len(out3))
+t3._save_plans([])
+shutil.rmtree(tmp3)
+
+rails0 = ai_agent.RiskRails({"max_trades_per_day": 0}, 15000)
+day_many = {"trades": 99, "loss_pct": 0.0, "loss_limit_hit": False, "sizing": {}}
+ok0, why0, sh0 = rails0.check(
+    {"code": "603806", "action": "BUY", "shares": 100, "limit_price": 13.37, "stop": 12.77},
+    proj, quote, day_many)
+check("已成交 99 笔仍允许继续买", ok0, (why0 or "")[:40] + " %d 股" % sh0)
+check("风控文案写明「不限笔数」", "不限" in rails0.describe())
+rails4 = ai_agent.RiskRails({"max_trades_per_day": 4}, 15000)
+ok4, why4, _ = rails4.check(
+    {"code": "603806", "action": "BUY", "shares": 100, "limit_price": 13.37, "stop": 12.77},
+    proj, quote, day_many)
+check("设回 4 笔时仍然拦得住", (not ok4) and "最大交易笔数" in why4, why4[:30])
+
 print("\n结论：%s" % ("全部通过" if ok else "有用例未通过"))
 sys.exit(0 if ok else 1)

@@ -39,7 +39,7 @@ USAGE_LOG = os.path.join(AI_DIR, "llm_usage.jsonl")
 RAILS_DEFAULT = {
     "max_position_pct": 40.0,        # 单只股票占总资金上限
     "max_total_position_pct": 80.0,  # 总仓位上限（始终留 20% 现金）
-    "max_trades_per_day": 4,
+    "max_trades_per_day": 0,         # 每日交易笔数上限；0 或负数 = 不限制
     "max_risk_per_trade_pct": 1.5,   # 单笔（成本-止损）最大亏损占总资金
     "daily_loss_limit_pct": 3.0,     # 当日亏损超过即当日禁止开新仓
     "min_price": 2.0,
@@ -170,17 +170,29 @@ def clean_playbook(text):
 # --------------------------------------------------------------------------- #
 # 硬风控
 # --------------------------------------------------------------------------- #
+def trades_cap(cfg):
+    """每日交易笔数上限；<=0 或缺失表示不限制（返回 None）。"""
+    v = float((cfg or {}).get("max_trades_per_day") or 0)
+    return None if v <= 0 else v
+
+
 class RiskRails:
     def __init__(self, cfg, capital):
         self.cfg = {**RAILS_DEFAULT, **(cfg or {})}
         self.capital = float(capital)
 
+    @staticmethod
+    def trades_cap(cfg):
+        return trades_cap(cfg)
+
     def describe(self):
         c = self.cfg
-        return ("单股≤%.0f%%｜总仓≤%.0f%%｜每日最多%d笔｜单笔风险≤%.1f%%｜组合风险≤%.1f%%｜"
+        cap = self.trades_cap(c)
+        trade_txt = ("每日不限笔数" if cap is None else "每日最多%.0f笔" % cap)
+        return ("单股≤%.0f%%｜总仓≤%.0f%%｜%s｜单笔风险≤%.1f%%｜组合风险≤%.1f%%｜"
                 "当日亏损>%.0f%%即停止开仓｜价格区间 %.1f~%.1f 元｜委托价偏离≤%.1f%%"
                 % (c["max_position_pct"], c["max_total_position_pct"],
-                   c["max_trades_per_day"], c["max_risk_per_trade_pct"],
+                   trade_txt, c["max_risk_per_trade_pct"],
                    c.get("max_total_risk_pct", 3.0),
                    c["daily_loss_limit_pct"], c["min_price"], c["max_price"],
                    c["price_band_pct"]))
@@ -211,8 +223,9 @@ class RiskRails:
         if act == "BUY":
             if day_state["loss_limit_hit"]:
                 return False, "当日亏损已达熔断线，禁止开新仓", 0
-            if day_state["trades"] >= c["max_trades_per_day"]:
-                return False, "已达当日最大交易笔数 %d" % c["max_trades_per_day"], 0
+            cap_trades = self.trades_cap(c)
+            if cap_trades is not None and day_state["trades"] >= cap_trades:
+                return False, "已达当日最大交易笔数 %.0f" % cap_trades, 0
             if (quote.get("pct") or 0) >= c["forbid_buy_pct"]:
                 return False, "当日已涨 %.1f%%，禁止追高买入" % (quote.get("pct") or 0), 0
             if shares <= 0:
@@ -874,28 +887,29 @@ class AITrader:
                                 "yellow"))
         except Exception as exc:                       # noqa: BLE001
             print(color("  （试错仓判定失败：%s）" % exc, "grey"))
-        # ③ 明日总交易笔数是硬上限（卖单也算）：计划里多出来的买单明天一定会被拒，
-        #    不如现在就砍掉，免得邮件里出现执行不了的计划。
+        # ③ 若设了每日交易笔数上限（卖单也算），计划里多出来的买单明天一定会被拒，
+        #    不如现在就砍掉，免得邮件里出现执行不了的计划。上限=不限时跳过。
         if force_plan:
             try:
-                cap_trades = int(float((self.rails.cfg or {}).get("max_trades_per_day") or 4))
-                n_sell = sum(1 for a in acts
-                             if (a.get("action") or "").upper() in ("SELL", "REDUCE"))
-                room = max(0, cap_trades - n_sell)
-                kept, dropped = 0, 0
-                trimmed = []
-                for a in acts:
-                    if (a.get("action") or "").upper() == "BUY":
-                        if kept >= room:
-                            dropped += 1
-                            continue
-                        kept += 1
-                    trimmed.append(a)
-                if dropped:
-                    acts = trimmed
-                    data["actions"] = acts
-                    print(color("  ⓘ 明日最多 %d 笔（卖单已占 %d 笔）→ 砍掉 %d 条执行不了的买入计划"
-                                % (cap_trades, n_sell, dropped), "yellow"))
+                cap_trades = trades_cap(self.rails.cfg)
+                if cap_trades is not None:
+                    n_sell = sum(1 for a in acts
+                                 if (a.get("action") or "").upper() in ("SELL", "REDUCE"))
+                    room = max(0, int(cap_trades) - n_sell)
+                    kept, dropped = 0, 0
+                    trimmed = []
+                    for a in acts:
+                        if (a.get("action") or "").upper() == "BUY":
+                            if kept >= room:
+                                dropped += 1
+                                continue
+                            kept += 1
+                        trimmed.append(a)
+                    if dropped:
+                        acts = trimmed
+                        data["actions"] = acts
+                        print(color("  ⓘ 明日最多 %d 笔（卖单已占 %d 笔）→ 砍掉 %d 条执行不了的买入计划"
+                                    % (int(cap_trades), n_sell, dropped), "yellow"))
             except Exception as exc:                   # noqa: BLE001
                 print(color("  （交易笔数裁剪失败：%s）" % exc, "grey"))
         results = self._execute(acts, snap, watch, day)
@@ -1216,9 +1230,10 @@ class AITrader:
             "预计组合风险额": round(risk, 2),
             "预计组合风险%": round(risk / equity * 100, 2) if equity else 0.0,
             "预计还可增加的风险额(硬上限 %.1f%%)" % risk_cap_pct: round(risk_room, 2),
-            "明日剩余可交易笔数(卖单已占 %d 笔)" % len(sold): int(
-                max(0, float((self.rails.cfg or {}).get("max_trades_per_day") or 4)
-                    - len(sold))),
+            "明日可交易笔数上限": ("不限（已按用户要求取消每日笔数限制）"
+                                if trades_cap(self.rails.cfg) is None
+                                else int(max(0, int(trades_cap(self.rails.cfg))
+                                             - len(sold)))),
             "说明": "卖出的钱明天是可以再买的：买入计划按这里的可用金额与组合风险额度来定。"
                     "若你手册里的自设目标比硬上限更严，先用硬上限判断「到底有没有空间」，"
                     "有空间就在空间内按手册谨慎取小；只有确实没有空间才允许零买入。",
@@ -1381,12 +1396,16 @@ class AITrader:
             return []
 
     def _trim_plans_to_trade_cap(self, for_date):
-        """同一执行日的计划单不能超过「每日最大交易笔数」（卖单也占名额）。
+        """同一执行日的计划单不超过「每日最大交易笔数」（卖单也占名额）。
 
+        上限为 0/负数＝不限制，此时直接返回、不裁剪。
         收盘计划阶段结束前对**最终文件**做一次裁剪——因为上一轮的未到期计划单
         会被保留下来，只按本轮新增去裁剪会漏算。
         """
-        cap = int(float((self.rails.cfg or {}).get("max_trades_per_day") or 4))
+        cap_v = trades_cap(self.rails.cfg)
+        if cap_v is None:                    # 不限制每日笔数 → 不做裁剪
+            return self._load_plans()
+        cap = int(cap_v)
         plans = self._load_plans()
         same = [p for p in plans if self._plan_exec_date(p) == for_date]
         if len(same) <= cap:
