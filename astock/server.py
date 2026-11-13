@@ -533,6 +533,24 @@ def _sma(values, n):
 # --------------------------------------------------------------------------- #
 # API
 # --------------------------------------------------------------------------- #
+def api_health(_q):
+    """轻量健康检查：只读本地状态，不碰任何外部行情接口。
+
+    2026-11-13 教训：健康检查原本打 /api/overview，而上游行情被封时它要 24 秒，
+    docker 6 秒超时 → 容器长期 unhealthy（FailingStreak 34），但服务其实活着。
+    """
+    try:
+        b = broker()
+        return {"ok": True,
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "capital": b.state["capital"],
+                "positions": len(b.state["positions"]),
+                "plans": len(_read_plans()),
+                "running": [j["id"] for j in running_jobs()]}
+    except Exception as exc:                       # noqa: BLE001
+        return {"ok": False, "error": str(exc)[:200]}
+
+
 def api_overview(_q):
     cfg = load_config()
     b = broker()
@@ -1502,6 +1520,7 @@ GET_ROUTES = {
     "/api/report_archive": api_report_archive,
     "/api/job": api_job,
     "/api/jobs": api_jobs,
+    "/api/health": api_health,
 }
 
 POST_ROUTES = {

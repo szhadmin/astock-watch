@@ -224,6 +224,14 @@ class RiskRails:
         ideal = float(c.get("min_order_amount") or 0)
         max_comm = float(c.get("max_commission_pct") or 0)
         hard = (5.0 / (max_comm / 100.0)) if max_comm > 0 else 0.0
+        # 关键：金额下限不能超过「单股仓位上限」能买到的钱，否则小账户会死锁
+        # （2026-11-13 实盘：总权益×25% = 3559 元 < 单笔 5000 元 → 永远买不进）
+        cap_pct = float(c.get("max_position_pct") or 0)
+        if cap_pct > 0 and self.capital > 0:
+            per_stock = self.capital * cap_pct / 100.0 * 0.95
+            if per_stock > 0:
+                ideal = min(ideal, per_stock) if ideal else ideal
+                hard = min(hard, per_stock) if hard else hard
         return max(ideal, hard), hard
 
     def check(self, order, snap, quote, day_state, cap_override=None, force_open=False):
@@ -635,8 +643,18 @@ class AITrader:
         for p in snap["positions"]:
             try:
                 positions.append(self._position_brief(p))
-            except Exception:
-                continue
+            except Exception as exc:                   # noqa: BLE001
+                # 行情/K线拿不到时不能把持仓丢掉（2026-11-13：东财被封 → 提示词里持仓 0 条）
+                positions.append({
+                    "code": p.get("code"), "name": p.get("name") or "",
+                    "现价": p.get("price"), "今日涨跌%": None,
+                    "持仓股数": p.get("shares"), "可卖股数": p.get("available"),
+                    "成本": p.get("cost"), "浮动盈亏%": p.get("pnl_pct"),
+                    "入场日": p.get("entry_date"), "我的止损": p.get("stop"),
+                    "我的目标": p.get("target"), "当初理由": p.get("note") or "",
+                    "⚠": "行情/K线获取失败（%s），以下只用本机持仓数据" % str(exc)[:40],
+                })
+                print(color("  ⚠ %s 行情获取失败，按本机持仓数据喂给模型" % p.get("code"), "yellow"))
         watch = []
         for code in self.watchlist:
             try:
@@ -1335,7 +1353,7 @@ class AITrader:
                                 "score": (_pos or {}).get("score"),
                                 "sector_pct": (q or {}).get("sector_pct"),
                                 "reason": reason,
-                            }, verbose=verbose)
+                            })
                     except Exception as _exc:                # noqa: BLE001
                         print(color("  （失败归档跳过：%s）" % _exc, "grey"))
             print(color("  %s %s %s" % ("✔" if ok2 else "✘", code, msg),

@@ -36,6 +36,6 @@ RUN chmod +x /app/docker/entrypoint.sh \
 EXPOSE 8770
 
 HEALTHCHECK --interval=30s --timeout=6s --start-period=25s --retries=3 \
-  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8770/api/overview',timeout=5).status==200 else 1)"
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8770/api/health',timeout=4).status==200 else 1)"
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]

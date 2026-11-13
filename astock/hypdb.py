@@ -53,10 +53,18 @@ def connect():
 
 
 def _row(d):
-    ctx = d.get("ctx") or {}
-    res = d.get("result") or {}
-    rets = res.get("rets") or {}
-    excs = res.get("excess_map") or {}
+    def as_dict(v):
+        """字段可能是 dict / list（历史脏数据）/ None —— 统一成 dict。"""
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, (list, tuple)):
+            return {}                    # 老格式的数组没有 h5/h10/h20 键，直接当空
+        return {}
+
+    ctx = as_dict(d.get("ctx"))
+    res = as_dict(d.get("result"))
+    rets = as_dict(res.get("rets"))
+    excs = as_dict(res.get("excess_map"))
 
     def f(v):
         try:
@@ -97,6 +105,8 @@ def sync(verbose=False):
                     try:
                         d = json.loads(line)
                     except Exception:
+                        continue
+                    if not isinstance(d, dict):      # 兼容脏数据（历史上有整行是 list 的情况）
                         continue
                     batch.append(_row(d))
                     if len(batch) >= 2000:
